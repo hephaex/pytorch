@@ -2,16 +2,26 @@
 # "what has to be done to add a Operation ..." first!
 
 import re
-from collections import OrderedDict
 from code_template import CodeTemplate
 
 try:
-    from typing import Any, Dict, List, Generic, Optional, Set, Tuple, \
-        Union, TypeVar
-    from mypy_extensions import TypedDict
-    TYPE_HINTS = True
+    import typing  # noqa: F401
 except ImportError:
-    TYPE_HINTS = False
+    raise RuntimeError(
+        'Missing build dependency: Unable to import the `typing` module. '
+        'Please install it via `conda install typing` or `pip install typing`')
+
+# flake8 doesn't take into account usages in type annotations.
+from typing import Union, Set  # noqa: F401
+from typing import Any, Dict, List, Optional, Tuple, NamedTuple
+
+try:
+    from mypy_extensions import TypedDict
+except ImportError:
+    # Avoid the dependency on the mypy_extensions package.
+    # It is required, however, for type checking.
+    def TypedDict(name, attrs, total=True):  # type: ignore
+        return Dict[Any, Any]
 
 import sys
 if sys.version_info[0] == 3:
@@ -29,11 +39,12 @@ else:
 #    declaration under Type.h  (right now, we call this template
 #    BROADCAST but it also handles default arguments)
 TYPE_METHOD_DECLARATION_BROADCAST = CodeTemplate("""\
-${return_type} ${api_name}(${formals_with_defaults}) const;
+${return_type} ${api_name}(${type_method_formals}) const override;
 """)
 # 2. broadcasting functions are implemented in Type.cpp
 TYPE_METHOD_DEFINITION_BROADCAST = CodeTemplate("""\
-${return_type} Type::${api_name}(${formals}) const {
+${return_type} TypeDefault::${api_name}(${type_method_formals}) const {
+    ${device_guard_declaration}
     Tensor ${broadcast_returns};
     std::tie(${broadcast_returns}) = ${broadcast_function}(${broadcast_actuals}, "${api_name}");
     return ${method_prefix_derived}${api_name}(${broadcast_modified_actuals});
@@ -48,29 +59,42 @@ ${return_type} Type::${api_name}(${formals}) const {
 #    actual implementation.  At the moment, this situation *only* occurs
 #    for 'native' declarations (so the native dispatch is hardcoded into
 #    the template here.)
+PURE_VIRTUAL_TYPE_METHOD_DECLARATION = CodeTemplate("""\
+virtual ${return_type} ${method_prefix_derived}${api_name}(${type_method_formals}) const = 0;
+""")
+DEPRECATED_PURE_VIRTUAL_TYPE_METHOD_DECLARATION = CodeTemplate("""\
+C10_DEPRECATED virtual ${return_type} \
+${method_prefix_derived}${api_name}(${type_method_formals}) const = 0;
+""")
+PURE_VIRTUAL_TYPE_METHOD_DECLARATION_BROADCAST = CodeTemplate("""\
+virtual ${return_type} ${api_name}(${type_method_formals}) const = 0;
+""")
+
 TYPE_METHOD_DECLARATION_ABSTRACT = CodeTemplate("""\
-virtual ${return_type} ${method_prefix_derived}${api_name}(${formals_with_defaults}) const;
+${return_type} ${method_prefix_derived}${api_name}(${type_method_formals}) const override;
 """)
 TYPE_METHOD_DEFINITION_ABSTRACT = CodeTemplate("""\
-${return_type} Type::${method_prefix_derived}${api_name}(${formals}) const {
-    runtime_error("${method_prefix_derived}${api_name} is not implemented for type %s", toString());
+${return_type} TypeDefault::${method_prefix_derived}${api_name}(${type_method_formals}) const {
+    AT_ERROR("${method_prefix_derived}${api_name} is not implemented for type ", toString());
 }
 """)
 TYPE_METHOD_DECLARATION_CONCRETE = CodeTemplate("""\
-virtual ${return_type} ${api_name}(${formals_with_defaults}) const;
+${return_type} ${api_name}(${type_method_formals}) const override;
 """)
 TYPE_METHOD_DEFINITION_CONCRETE = CodeTemplate("""\
-${return_type} Type::${api_name}(${formals}) const {
+${return_type} TypeDefault::${api_name}(${type_method_formals}) const {
+    ${device_guard_declaration}
     ${type_definition_body}
 }
 """)
-# 4. add virtual override to TypeDerived.h
+# 4. add override to TypeDerived.h
 TYPE_DERIVED_DECLARATION = CodeTemplate("""\
-virtual ${return_type} ${method_prefix_derived}${api_name}(${formals}) const override;
+${return_type} ${method_prefix_derived}${api_name}(${type_method_formals}) const override;
 """)
 # 5. add override definition to TypeDerived.cpp
 TYPE_DERIVED_DEFINITION = CodeTemplate("""\
-${return_type} ${Type}::${method_prefix_derived}${api_name}(${formals}) const {
+${return_type} ${Type}::${method_prefix_derived}${api_name}(${type_method_formals}) const {
+    ${device_guard_declaration}
     ${type_definition_body}
 }
 """)
@@ -78,37 +102,62 @@ ${return_type} ${Type}::${method_prefix_derived}${api_name}(${formals}) const {
 # because we will inherit it from the TYPE_METHOD_DEFINITION_CONCRETE in
 # the superclass.  But it doesn't seem to be harmful.
 TYPE_DERIVED_DEFINITION_NATIVE = CodeTemplate("""\
-${return_type} ${Type}::${api_name}(${formals}) const {
-    ${return_call} at::native::${native_type_method_dispatch}(${actuals});
+${return_type} ${Type}::${api_name}(${type_method_formals}) const {
+    ${device_guard_declaration}
+    ${return_call} at::native::${native_type_method_dispatch}(/* actuals */ ${actuals});
+}
+""")
+TYPE_DERIVED_DEFINITION_NATIVE_MISSING = CodeTemplate("""\
+${return_type} ${Type}::${api_name}(${type_method_formals}) const {
+    AT_ERROR("${api_name} not supported on ${Type}");
 }
 """)
 TYPE_DEFINITION_BODY_NATIVE = CodeTemplate("""\
-${return_call} at::native::${native_type_method_dispatch}(${actuals});
+${return_call} at::native::${native_type_method_dispatch}(/* native_actuals */ ${native_actuals});
 """)
 
-# 6. add non-virtual declaration to Tensor.h
+# Overrideable stubs to be used in user-extendable backends
+TYPE_DEFINITION_EXTENSION_BACKEND = CodeTemplate("""\
+${return_type} ${Type}::${method_prefix_derived}${api_name}(${type_method_formals}) const {
+    return ${Type}Dispatch::get_function<${return_type} (*)(${formals_types})>("${schema}")(${native_actuals});
+}
+""")
+
+# add non-virtual declaration to Tensor.h
 TENSOR_METHOD_DECLARATION = CodeTemplate("""\
 ${return_type} ${api_name}(${method_formals_with_defaults})${const_mark};
 """)
-# 7. add non-virtual declaration to Tensor.cpp
+# add non-virtual declaration to Tensor.cpp
 TENSOR_METHOD_DEFINITION = CodeTemplate("""\
 inline ${return_type} Tensor::${api_name}(${method_formals})${const_mark} {
     return type().${api_name}(${method_actuals});
 }
 """)
-# 8. add a method declaration in Functions.h
+# add a method declaration in Functions.h
 FUNCTION_DECLARATION = CodeTemplate("""\
 static inline ${return_type} ${api_name}(${formals_with_defaults});
 """)
-# 9. add method definition in Functions.h
+# add a method declaration in Functions.h
+DEPRECATED_FUNCTION_DECLARATION = CodeTemplate("""\
+C10_DEPRECATED static inline ${return_type} ${api_name}(${formals_with_defaults});
+""")
+# add method definition in Functions.h
 FUNCTION_DEFINITION = CodeTemplate("""\
 static inline ${return_type} ${api_name}(${formals}) {
-    return ${inferred_type}.${api_name}(${actuals});
+    return ${inferred_type}.${api_name}(${type_method_actuals});
 }
 """)
-# 10. add a native declaration for a native function
+# add a native declaration for a native function
 NATIVE_DECLARATION = CodeTemplate("""\
-${return_type} ${native_type_method_dispatch}(${formals_with_defaults});
+CAFFE2_API ${return_type} ${native_type_method_dispatch}(${formals_with_defaults});
+""")
+
+# special method definition for factory functions in Functions.h
+FACTORY_DEFINITION = CodeTemplate("""\
+static inline ${return_type} ${api_name}(${formals}) {
+    const DeviceGuard guard(options.device());
+    return at::native::${api_name}(${type_method_actuals});
+}
 """)
 
 # We need to cast to the base type because C++ may hide the base class
@@ -116,21 +165,22 @@ ${return_type} ${native_type_method_dispatch}(${formals_with_defaults});
 # the same name (but different signature) already
 ZERO_DIM_CHECK = CodeTemplate("""\
 if (${check_name}.dim() == 0) {
-    return static_cast<const Type*>(this)->${api_name}(${zero_dim_actuals});
+    return static_cast<const TypeExtendedInterface*>(this)->${api_name}(${zero_dim_actuals});
 }""")
 
 ZERO_DIM_ONLY = CodeTemplate("""\
-runtime_error("${api_name} only supports a 0-dimensional ${check_name} tensor, but got tensor "
-    "with %" PRId64 " dimension(s)", ${check_name}.dim());
+AT_ERROR("${api_name} only supports a 0-dimensional ${check_name} tensor, but got tensor "
+    "with ", ${check_name}.dim(), " dimension(s).");
 """)
 
 SPARSE_CHECK = CodeTemplate("""\
-if(${check_name}.type().is_sparse()) {
-    return static_cast<const Type*>(this)->${api_name}(${sparse_actuals});
+if(${check_name}.is_sparse()) {
+    return static_cast<const TypeExtendedInterface*>(this)->${api_name}(${sparse_actuals});
 }""")
 
 BUFFER_DEFINITION = CodeTemplate("""\
-auto ${name}_ = new ${Tensor}(context);
+auto ${name}_ = c10::make_intrusive<TensorImpl, UndefinedTensorImpl>(
+    ${Backend}TensorId(), caffe2::TypeMeta::Make<${ScalarType}>(), ${THTensor}_new(), false).release();
 auto ${name} = Tensor(${name}_, false);""")
 
 CONDITIONAL_INITIALIZER = CodeTemplate("""\
@@ -139,8 +189,6 @@ if (${name}.defined()) {
 }""")
 
 CALL_TEMPLATE = CodeTemplate("${cname}(${actuals})")
-
-HALF_CONVERSION = CodeTemplate("convert<half>(${value})")
 
 
 class NYIError(Exception):
@@ -152,16 +200,15 @@ class NYIError(Exception):
 
 TYPE_FORMAL_GENERIC = {
     'THTensor*': 'Tensor &',
-    'THSTensor*': 'SparseTensor',
+    'THSTensor*': 'SparseTensorRef',
     'THBoolTensor*': 'Tensor &',
     'THIndexTensor*': 'Tensor &',
     'THIntegerTensor*': 'Tensor &',
     'THDenseTensor*': 'Tensor &',
     'THDenseIndexTensor*': 'Tensor &',
-    'THStorage*': 'Storage &',
+    'THStorage*': 'Storage',
     'THGenerator*': 'Generator *',
-    'THSize*': 'IntList',
-    'THStride*': 'IntList',
+    'IntArrayRefSize': 'IntArrayRef',
     'accreal': 'Scalar',
     'real': 'Scalar',
     'long': 'int64_t',
@@ -169,7 +216,7 @@ TYPE_FORMAL_GENERIC = {
 
 DYNAMIC_TYPE = {
     'THTensor*': 'Tensor',
-    'THSTensor*': 'SparseTensor',
+    'THSTensor*': 'SparseTensorRef',
     'THBoolTensor*': 'BoolTensor',
     'THIndexTensor*': 'IndexTensor',
     'THIntegerTensor*': 'IntegerTensor',
@@ -177,11 +224,15 @@ DYNAMIC_TYPE = {
     'THDenseIndexTensor*': 'IndexTensor',
     'THStorage*': 'Storage',
     'THGenerator*': 'Generator*',
-    'THSize*': 'IntList',
-    'THStride*': 'IntList',
+    'IntArrayRefSize': 'IntArrayRef',
     'accreal': 'accreal',
     'real': 'real',
     'long': 'int64_t',
+}
+
+NATIVE_DYNAMIC_TYPE = {
+    'Tensor &': 'Tensor',
+    'const Tensor &': 'Tensor',
 }
 
 TYPE_RETURN = {
@@ -200,68 +251,102 @@ TYPE_RETURN = {
 CHECKED_CAST = {
     'THTensor*':
         CodeTemplate(
-            'checked_cast_tensor<${Tensor}>(${arg_name}.pImpl,"${arg_name}",${arg_pos}, ${null_okay})'),
+            'checked_tensor_unwrap('
+            '${arg_name},"${arg_name}",${arg_pos}, ${null_okay}, '
+            'Backend::${Backend}, ScalarType::${ScalarName})'),
     'THSTensor*':
-    CodeTemplate(
-        'checked_cast_tensor<Sparse${Tensor}>(${arg_name}.tref.pImpl,"${arg_name}",${arg_pos},false)'),
+        CodeTemplate(
+            'checked_tensor_unwrap('
+            '${arg_name}.tref,"${arg_name}",${arg_pos},false, '
+            'Backend::${Backend}, ScalarType::${ScalarName})'),
     'THBoolTensor*':
         CodeTemplate(
-            'checked_cast_tensor<${Backend}ByteTensor>(${arg_name}.pImpl,"${arg_name}",${arg_pos}, ${null_okay})'),
+            'checked_tensor_unwrap('
+            '${arg_name},"${arg_name}",${arg_pos}, ${null_okay}, '
+            'Backend::${Backend}, ScalarType::Byte)'),
     'THIndexTensor*':
         CodeTemplate(
-            'checked_cast_tensor<${Backend}LongTensor>(${arg_name}.pImpl,"${arg_name}",${arg_pos}, ${null_okay})'),
+            'checked_tensor_unwrap('
+            '${arg_name},"${arg_name}",${arg_pos}, ${null_okay}, '
+            'Backend::${Backend}, ScalarType::Long)'),
     'THIntegerTensor*':
         CodeTemplate(
-            'checked_cast_tensor<${Backend}IntTensor>(${arg_name}.pImpl,"${arg_name}",${arg_pos}, ${null_okay})'),
+            'checked_tensor_unwrap('
+            '${arg_name},"${arg_name}",${arg_pos}, ${null_okay}, '
+            'Backend::${Backend}, ScalarType::Int)'),
     'THDenseTensor*':
         CodeTemplate(
-            'checked_cast_tensor<${DenseTensor}>(${arg_name}.pImpl,"${arg_name}",${arg_pos}, ${null_okay})'),
+            'checked_tensor_unwrap('
+            '${arg_name},"${arg_name}",${arg_pos}, ${null_okay}, '
+            'Backend::${DenseBackend}, ScalarType::${ScalarName})'),
     'THDenseIndexTensor*':
         CodeTemplate(
-            'checked_cast_tensor<${DenseBackend}LongTensor>(${arg_name}.pImpl,"${arg_name}",${arg_pos}, ${null_okay})'),
-    'THStorage*': CodeTemplate('checked_cast_storage<${Storage}>(&${arg_name},"${arg_name}",${arg_pos})'),
+            'checked_tensor_unwrap('
+            '${arg_name},"${arg_name}",${arg_pos}, ${null_okay}, '
+            'Backend::${DenseBackend}, ScalarType::Long)'),
+    'THStorage*':
+        CodeTemplate(
+            'checked_storage('
+            '${arg_name},"${arg_name}",${arg_pos}, '
+            # We're punning here (Backend and DeviceType constructors coincide)
+            # but DeviceType is the correct way to classify storages
+            'DeviceType::${Backend}, at::scalarTypeToDataType(ScalarType::${ScalarName}))'),
     'THGenerator*':
         CodeTemplate(
-            'check_generator<${Backend}Generator>(${arg_name}, &context->defaultGenerator(backend()))'),
-    'THSize*': CodeTemplate('THLongStorageView::makeFromSize(${arg_name})'),
-    'THStride*': CodeTemplate('THLongStorageView::makeFromStride(${arg_name}, ${noelem_to_empty})'),
+            'check_generator<${Backend}Generator>(${arg_name}, &globalContext().defaultGenerator(device_type()))'),
+    # This is a cast done via direct-construction
+    'IntArrayRefStride': CodeTemplate('at::IntArrayRef ${result_name} = get_intlist_stride_th(${arg_name});'),
     'real': CodeTemplate('${arg_name}.to${ScalarName}()'),
     'accreal': CodeTemplate('${arg_name}.to${AccScalarName}()'),
-    'TensorList': CodeTemplate('tensor_list_checked_cast<${Tensor}, Tensor, '
-                               '${THTensor}>(${arg_name},"${arg_name}",${arg_pos})'),
-    'IntList': CodeTemplate('check_intlist<${size}>(${arg_name}, "${arg_name}", ${arg_pos}${,default_init})')
+    'TensorList': CodeTemplate(
+            'checked_tensor_list_unwrap(${arg_name},"${arg_name}",${arg_pos}, '
+            'Backend::${Backend}, ScalarType::${ScalarName})'),
+    'IntArrayRef': CodeTemplate('check_intlist<${size}>(${arg_name}, "${arg_name}", ${arg_pos}${,default_init})')
 }
 
 CHECKED_USE = {
-    'THTensor*': '{}_->tensor',
-    'THSTensor*': '{}_->tensor',
-    'THIndexTensor*': '{}_->tensor',
-    'THBoolTensor*': '{}_->tensor',
-    'THIntegerTensor*': '{}_->tensor',
-    'THDenseTensor*': '{}_->tensor',
-    'THDenseIndexTensor*': '{}_->tensor',
-    'THStorage*': '{}_->storage',
+    'THTensor*': '{}_',
+    'THSTensor*': '{}_',
+    'THIndexTensor*': '{}_',
+    'THBoolTensor*': '{}_',
+    'THIntegerTensor*': '{}_',
+    'THDenseTensor*': '{}_',
+    'THDenseIndexTensor*': '{}_',
+    'THStorage*': '{}_.unsafeGetStorageImpl()',
     'THGenerator*': '{}_->generator',
     'TensorList': "{0}_.data(), {0}_.size()",
 }
 
 CHECKED_USE_NULLABLE = CodeTemplate('${arg_name}_ ? ${usage} : NULL')
 
+ALLOC_NOARGS_WRAP = {
+    'THTensor*': 'c10::make_intrusive<TensorImpl, UndefinedTensorImpl>'
+                 '(${Backend}TensorId(), caffe2::TypeMeta::Make<${ScalarType}>(), allocator(), false).release()',
+    'THBoolTensor*': 'c10::make_intrusive<TensorImpl, UndefinedTensorImpl>'
+                     '(${Backend}TensorId(), scalarTypeToTypeMeta(ScalarType::Byte), allocator(), false).release()',
+    'THIndexTensor*': 'c10::make_intrusive<TensorImpl, UndefinedTensorImpl>'
+                      '(${Backend}TensorId(), scalarTypeToTypeMeta(ScalarType::Long), allocator(), false).release()',
+    'THIntegerTensor*': 'c10::make_intrusive<TensorImpl, UndefinedTensorImpl>'
+                        '(${Backend}TensorId(), scalarTypeToTypeMeta(ScalarType::Int), allocator(), false).release()',
+    'THDenseTensor*': 'c10::make_intrusive<TensorImpl, UndefinedTensorImpl>'
+                      '(${Backend}TensorId(), caffe2::TypeMeta::Make<${ScalarType}>(), allocator(), false).release()',
+    'THDenseIndexTensor*': 'c10::make_intrusive<TensorImpl, UndefinedTensorImpl>'
+                           '(${Backend}TensorId(), scalarTypeToTypeMeta(ScalarType::Long), '
+                           'allocator(), false).release()'
+}
+
 ALLOC_WRAP = {
-    'THTensor*': 'new ${Tensor}(context${,arguments})',
-    'THBoolTensor*': 'new ${Backend}ByteTensor(context${,arguments})',
-    'THIndexTensor*': 'new ${Backend}LongTensor(context${,arguments})',
-    'THIntegerTensor*': 'new ${Backend}IntTensor(context${,arguments})',
-    'THSTensor*': 'new Sparse${Tensor}(context${,arguments})',
-    'THDenseTensor*': 'new ${DenseTensor}(context${,arguments})',
-    'THDenseIndexTensor*': 'new ${DenseBackend}LongTensor(context${,arguments})',
+    'THTensor*': '${arguments}',
+    'THBoolTensor*': '${arguments}',
+    'THIndexTensor*': '${arguments}',
+    'THIntegerTensor*': '${arguments}',
+    'THDenseTensor*': '${arguments}',
+    'THDenseIndexTensor*': '${arguments}',
 }
 
 # Replacements for constants when calling into TH
 CONSTANT_REPLACEMENTS = [
     ('AS_REAL', '${AS_REAL}'),
-    ('__storage_size.get\\(\\)',
-     'THLongStorageView::makeFromLength(static_cast<int64_t>(storage.size()))'),
     ('__last_dim', 'self.ndimension()-1'),
 ]
 
@@ -282,152 +367,204 @@ class nested_dict(object):
             return r
         return self.parent[x]
 
-if TYPE_HINTS:
-    Environment = TypedDict('Environment', {
-        'ScalarName': str,
-        'THTensor': str,
-        'THType': str,
-        'THTensor': str,
-        'Backend': str,
-        'AccScalarName': str,
-    })
 
-    TopEnvironment = TypedDict('TopEnvironment', {
-        'type_registrations': List[str],
-        'type_headers': List[str],
-        'type_method_declarations': List[str],
-        'type_method_definitions': List[str],
-        'type_method_inline_definitions': List[str],
-        'tensor_method_declarations': List[str],
-        'tensor_method_definitions': List[str],
-        'function_declarations': List[str],
-        'function_definitions': List[str],
-        'type_ids': List[str],
-        'native_function_declarations': List[str],
-    })
+Environment = TypedDict('Environment', {
+    'ScalarName': str,
+    'THTensor': str,
+    'THType': str,
+    'THTensor': str,
+    'Backend': str,
+    'AccScalarName': str,
+})
 
-    # A Declarations.cwrap formal argument
-    # type can contain THTensor* types
-    THFormal = TypedDict('THFormal', {
-        'name': str,
-        'type': str,
-        'dynamic_type': str,
-        'kwarg_only': bool,
-        'is_nullable': bool,
-        'default': str,
-        'default_init': str,
-        'python_default_init': str,
-        'output': bool,
-        'size': int,
-        'declared_type': str,
-        'ignore_check': bool,
-        'allocate': bool,
-        'mask': bool,
-        'if_true': bool,
-        'if_false': bool,
-        'wrap_dim': str,
-        # Broadcast is originally a str but gets unwrapped to a List or Dict in-place
-        'broadcast': Any,
-        'resize': str,
-        'cpu_zero': bool,
-        'zero': bool,
-    }, total=False)
+TopEnvironment = TypedDict('TopEnvironment', {
+    'type_registrations': List[str],
+    'type_headers': List[str],
+    'pure_virtual_type_method_declarations': List[str],
+    'pure_virtual_extended_type_method_declarations': List[str],
+    'type_method_declarations': List[str],
+    'type_method_definitions': List[str],
+    'tensor_method_declarations': List[str],
+    'tensor_method_definitions': List[str],
+    'function_declarations': List[str],
+    'function_definitions': List[str],
+    'type_ids': List[str],
+    'native_function_declarations': List[str],
+})
 
-    # A native_functions.yaml formal argument
-    # type can contain Tensor, BoolTensor, IndexTensor types
-    NativeFormal = TypedDict('NativeFormal', {
-        'name': str,
-        'type': str,
-        'dynamic_type': str,
-        'kwarg_only': bool,
-        'is_nullable': bool,
-        'default': str,
-        'default_init': str,
-        'python_default_init': str,
-        'output': bool,
-        'size': int,
-    }, total=False)
+# A Declarations.cwrap formal argument
+# type can contain THTensor* types
+THFormal = TypedDict('THFormal', {
+    'name': str,
+    'type': str,
+    'dynamic_type': str,
+    'kwarg_only': bool,
+    'is_nullable': bool,
+    'default': str,
+    'default_init': str,
+    'output': bool,
+    'size': int,
+    'declared_type': str,
+    'ignore_check': bool,
+    'allocate': bool,
+    'mask': bool,
+    'if_true': bool,
+    'if_false': bool,
+    'wrap_dim': str,
+    # Broadcast is originally a str but gets unwrapped to a List or Dict in-place
+    'broadcast': Any,
+    'resize': str,
+    'cpu_zero': bool,
+    'zero': bool,
+}, total=False)
 
-    # Generic ATen formal.
-    # type can contain Tensor& reference types.
-    AtFormal = TypedDict('AtFormal', {
-        'name': str,
-        'type': str,
-        'dynamic_type': str,
-        'kwarg_only': bool,
-        'is_nullable': bool,
-        'default': str,
-        'default_init': str,
-        'python_default_init': str,
-        'output': bool,
-        'size': int,
-    }, total=False)
+# Generic ATen formal or native_functions.yaml formal argument.
+# type can contain Tensor& reference types.
+AtFormal = TypedDict('AtFormal', {
+    'name': str,
+    'type': str,
+    'dynamic_type': str,
+    'kwarg_only': bool,
+    'is_nullable': bool,
+    'default': str,
+    'default_init': str,
+    'output': bool,
+    'size': int,
+}, total=False)
 
-    ReturnType = TypedDict('ReturnType', {
-        'name': str,
-        'type': str,
-        'dynamic_type': str,
-    }, total=False)
+# Note [field_name versus name]
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# What is the difference between "field_name" and "name"?
+#
+# Return values of ATen operators always have a name: if it is not
+# explicitly assigned a name inside native_functions.yaml like func:
+# myop() -> (Tensor indices, Tensor value), then the codegen will
+# automatically assign it a name like result0, or name might be
+# specified inside Declarations.cwrap.  We don't want these assigned
+# names to become part of the public API when we return a namedtuple for
+# any such multiple-return function.
+#
+# Thus field_name is like name, but it is defined only when there is a
+# name specified in native_functions.yaml. If field_name is defined,
+# then the codegen would generate code to return namedtuple. Otherwise,
+# it would just return tuple.
 
-    ReturnDecl = TypedDict('ReturnDecl', {
-        'kind': str,
-        'type': str,
-        'arguments': List[int],
-    }, total=False)
+ReturnType = TypedDict('ReturnType', {
+    'name': str,
+    # See Note [field_name versus name]
+    'field_name': str,
+    'type': str,
+    'dynamic_type': str,
+}, total=False)
 
-    # Represents a buffer in nn.yaml
-    NNBuffer = TypedDict('NNBuffer', {
-        'name': str,
-    })
+ReturnDecl = TypedDict('ReturnDecl', {
+    'kind': str,
+    'type': str,
+    'arguments': List[int],
+}, total=False)
 
-    FunctionOption = TypedDict('FunctionOption', {
-        'arguments': List[THFormal],
-        'mode': str,
-        'name': str,
-        'return': ReturnDecl,
-        'variants': str,
-        'type_method_definition_dispatch': str,
-        'cname': str,
-        'backends': List[str],
-        'api_name': str,
-        'backend_type_pairs': List[Tuple[str, str]],
-        'inplace': bool,
-        'aten_dense_sparse': bool,
-        'sparse': bool,
-        'scalar_check': str,
-        'aten_custom_call': str,
-        'type_definition_body': List[str],
-        # cimpls is really a List[FunctionOption]
-        'cimpls': List[Any],
-        'when_spares_dispatch': str,
-        'actuals': List[str],
-        'buffers': List[NNBuffer],
-        'zero_dim_dispatch_when_scalar': str,
-        'zero_dim_tensor_only': bool,
-        'when_sparse_dispatch': str,
-        'formals_list': List[AtFormal],
-        'condition': str,
-        'auto_gpu': bool,
-        'cpu_half': bool,
-        # options should be List[FunctionOption]
-        'options': Any,
-        'formals': List[str],
-        'formals_with_defaults': List[str],
-        'returns': List[ReturnType],
-        'return_type': str,
-        'return_call': str,
-        'method_formals': List[str],
-        'method_formals_with_defaults': List[str],
-        'method_actuals': List[str],
-        'const_mark': str,
-        'method_prefix_derived': str,
-        'broadcast_actuals': List[str],
-        'broadcast_returns': List[str],
-        'inferred_type': str,
-        'broadcast_function': str,
-        'broadcast_modified_actuals': List[str],
-        'native_type_method_dispatch': str,
-    })
+# Represents a buffer in nn.yaml
+NNBuffer = TypedDict('NNBuffer', {
+    'name': str,
+})
+
+FunctionOption = TypedDict('FunctionOption', {
+    'actuals': List[str],
+    'api_name': str,
+    'arguments': List[THFormal],
+    'aten_custom_call': str,
+    'aten_dense_sparse': bool,
+    'backend_type_pairs': List[Tuple[str, str]],
+    'backends': List[str],
+    'broadcast_actuals': List[str],
+    'broadcast_function': str,
+    'broadcast_modified_actuals': List[str],
+    'broadcast_returns': List[str],
+    'buffers': List[NNBuffer],
+    # cimpls is really a List[FunctionOption]
+    'cimpls': List[Any],
+    'cname': str,
+    'condition': str,
+    'const_mark': str,
+    'device_guard': bool,
+    'device_guard_declaration': str,
+    'with_gil': bool,
+    'cpu_half': bool,
+    'deprecated': bool,
+    # See Note [field_name versus name]
+    'field_name': str,
+    'formals_list': List[AtFormal],
+    'formals_with_defaults': List[str],
+    'formals': List[str],
+    'formals_types': List[str],
+    'inferred_type': str,
+    'inplace': bool,
+    'matches_jit_signature': bool,
+    # This controls whether or not we generate the interface in Type or
+    # TypeExtendedInterface
+    'extended_method': bool,
+    'method_actuals': List[str],
+    'method_formals_with_defaults': List[str],
+    'method_formals': List[str],
+    'method_prefix_derived': str,
+    'mode': str,
+    'python_module': str,
+    'name': str,
+    'native_actuals': List[str],
+    'native_type_method_dispatch': str,
+    # options should be List[FunctionOption]
+    'options': Any,
+    'schema_string': str,
+    'requires_tensor': bool,
+    'return_call': str,
+    'return_type': str,
+    'return': ReturnDecl,
+    'returns': List[ReturnType],
+    'scalar_check': str,
+    # schema used for extension backend operator registration
+    'schema': str,
+    'sparse': bool,
+    'type_definition_body': List[str],
+    'type_method_actuals': List[str],
+    'type_method_definition_dispatch': str,
+    'type_method_formals': List[str],
+    'variants': str,
+    'when_spares_dispatch': str,
+    'when_sparse_dispatch': str,
+    'with_gil': bool,
+    'zero_dim_dispatch_when_scalar': str,
+    'zero_dim_tensor_only': bool,
+})
+
+OutputDeclaration = NamedTuple('OutputDeclaration', [
+    ('name', str),
+    ('matches_jit_signature', bool),
+    ('schema_string', str),
+    ('method_prefix_derived', str),
+    ('arguments', List[AtFormal]),
+    ('method_of', List[str]),
+    ('mode', str),
+    ('python_module', str),
+    ('buffers', Optional[List[str]]),
+    ('returns', List[ReturnType]),
+    ('inplace', bool),
+    ('is_factory_method', bool),
+    ('abstract', bool),
+    ('requires_tensor', bool),
+    ('device_guard', bool),
+    ('with_gil', bool),
+    ('deprecated', bool),
+])
+
+
+def device_guard(option, formals, dispatch_options, dispatch_tensor):
+    # For factory methods the `DeviceGuard` is already in the template.
+    if option.get('device_guard', True):
+        if dispatch_options:
+            return 'const DeviceGuard device_guard({}.device());'.format(dispatch_options['name'])
+        if dispatch_tensor:
+            return 'const OptionalDeviceGuard device_guard(device_of({}));'.format(dispatch_tensor)
+    return '// DeviceGuard omitted'
 
 
 def is_real_argument_to_wrapper(argument):
@@ -440,6 +577,17 @@ def is_real_argument_to_wrapper(argument):
 def is_mutable_formal_argument(argument, option):
     # type: (THFormal, FunctionOption) -> bool
     return argument.get('output') or option['inplace'] and argument['name'] == 'self'
+
+
+def check_methods_do_not_start_with_underscore(name, is_method):
+    if name in {'_values', '_indices', '_nnz', '_dimI', '_dimV', '_coalesced_'}:
+        return
+    if is_method and name.startswith('_') and not name.startswith('__') and not name.startswith('_th_'):
+        message = "Function '{}' starts with a single underscore and is ".format(name)
+        message += "configured to have a method on Tensor. Functions that start with "
+        message += " a single underscore should only be functions in the at:: "
+        message += "namespace and not methods on Tensor!"
+        raise RuntimeError(message)
 
 
 def to_return_type(arg, option):
@@ -458,7 +606,7 @@ def to_return_type(arg, option):
 
 
 def create_generic(top_env, declarations):
-    # type: (TopEnvironment, List[FunctionOption]) -> List[OrderedDict]
+    # type: (TopEnvironment, List[FunctionOption]) -> List[OutputDeclaration]
     # translates defaults from cwrap types to C++ values
     def translate_default(argument, type_str, default):
         # type: (THFormal, str, Any) -> Any
@@ -470,7 +618,13 @@ def create_generic(top_env, declarations):
         for pattern, replacement in HEADER_CONSTANT_REPLACEMENTS:
             default = re.sub(pattern, replacement, str(default))
         if type_str in {'Scalar', 'int64_t', 'double'}:
-            return float(default) if '.' in default else int(default)
+            try:
+                return int(default)
+            except Exception:
+                try:
+                    return float(default)
+                except Exception:
+                    return default
         elif type_str == 'bool':
             assert default.lower() in ['true', 'false']
             return default.lower() == 'true'
@@ -495,10 +649,6 @@ def create_generic(top_env, declarations):
             default = translate_default(argument, type_str, argument['default'])
             translated['default'] = default
             translated['default_init'] = argument.get('default_init', default)
-        if 'python_default_init' in argument:
-            assert 'default' not in argument
-            default = translate_default(argument, type_str, argument['python_default_init'])
-            translated['python_default_init'] = default
         if argument.get('output'):
             translated['output'] = True
         if argument.get('size'):
@@ -581,11 +731,12 @@ def create_generic(top_env, declarations):
         # type: (List[AtFormal]) -> Optional[str]
         # dispatch to self if it's a parameter
         for formal in formals:
-            if formal['name'] == 'self' and formal['dynamic_type'] == 'Tensor':
+            if formal['name'] == 'self' and formal['dynamic_type'] == 'Tensor' and not formal.get('is_nullable', False):
                 return formal['name']
         # otherwise dispatch to the first Tensor or TensorList
         for formal in formals:
-            if 'TensorList' == formal['dynamic_type'] or formal['dynamic_type'] == 'Tensor':
+            if 'TensorList' == formal['dynamic_type'] or formal['dynamic_type'] == 'Tensor' and \
+               not formal.get('is_nullable', False):
                 return formal['name']
         return None
 
@@ -647,7 +798,7 @@ def create_generic(top_env, declarations):
             # _out variants must create buffers and insert them in the
             # arguments list between output and input arguments
             for buffer in option['buffers']:
-                body.append('Tensor {} = tensor();'.format(buffer['name']))
+                body.append('Tensor {} = at::empty({{0}}, this->options());'.format(buffer['name']))
             actuals = [arg['name'] for arg in option['arguments'] if arg.get('output')]
             actuals += [buffer['name'] for buffer in option['buffers']]
             actuals += [arg['name'] for arg in option['arguments'] if not arg.get('output')]
@@ -656,7 +807,7 @@ def create_generic(top_env, declarations):
         return body
 
     def process_option(option, output_options):
-        # type: (FunctionOption, List[OrderedDict]) -> None
+        # type: (FunctionOption, List[OutputDeclaration]) -> None
         option['inplace'] = re.search(
             '(^__i|[^_]_$)', option['api_name']) is not None
 
@@ -677,9 +828,13 @@ def create_generic(top_env, declarations):
         option['method_actuals'] = [
             f['name'] if f['name'] != 'self' else '*this' for f in formals]
 
+        # There are no cases where these differ, but they do in native_functions
+        option['type_method_formals'] = option['formals']
+        option['type_method_actuals'] = option['actuals']
+
         option['const_mark'] = '' if option['inplace'] else ' const'
 
-        is_method = 'method' in option['variants']
+        assert 'method' not in option['variants'], 'TH functions cannot be methods'
         is_function = 'function' in option['variants']
         dispatch_tensor = find_dispatch_tensor(formals)
         is_namespace_function = is_function and dispatch_tensor is not None
@@ -687,14 +842,22 @@ def create_generic(top_env, declarations):
         broadcast_arg = get_broadcast_argument(option)
         # "s_" for "same size".
         option['method_prefix_derived'] = '' if broadcast_arg is None else 's_'
+        if option['mode'] == 'TH':
+            option['device_guard'] = False
+        option['device_guard_declaration'] = device_guard(option, formals, False, dispatch_tensor)
+
         env = nested_dict(option, top_env)
 
         mode = option['mode']
         abstract = True
+        assert option['extended_method'], 'Expected legacy operator to be an extended method'
+
         if mode == 'NN' and option.get('cimpls') is None:
             # NN function with no _forward/_backward suffix don't have cimpls.
             # They call the _forward function and discard any buffer returns
             abstract = False
+            top_env['pure_virtual_extended_type_method_declarations'].append(
+                PURE_VIRTUAL_TYPE_METHOD_DECLARATION.substitute(env))
             top_env['type_method_declarations'].append(
                 TYPE_METHOD_DECLARATION_CONCRETE.substitute(env))
             body = emit_nn_body(option)
@@ -702,11 +865,17 @@ def create_generic(top_env, declarations):
                 TYPE_METHOD_DEFINITION_CONCRETE.substitute(
                     env, type_definition_body=body))
         elif broadcast_arg is None:
+            top_env['pure_virtual_extended_type_method_declarations'].append(
+                PURE_VIRTUAL_TYPE_METHOD_DECLARATION.substitute(env))
             top_env['type_method_declarations'].append(
                 TYPE_METHOD_DECLARATION_ABSTRACT.substitute(env))
             top_env['type_method_definitions'].append(
                 TYPE_METHOD_DEFINITION_ABSTRACT.substitute(env))
         else:
+            top_env['pure_virtual_extended_type_method_declarations'].append(
+                PURE_VIRTUAL_TYPE_METHOD_DECLARATION.substitute(env))
+            top_env['pure_virtual_extended_type_method_declarations'].append(
+                PURE_VIRTUAL_TYPE_METHOD_DECLARATION_BROADCAST.substitute(env))
             top_env['type_method_declarations'].append(
                 TYPE_METHOD_DECLARATION_BROADCAST.substitute(env))
             top_env['type_method_declarations'].append(
@@ -731,15 +900,8 @@ def create_generic(top_env, declarations):
                 TYPE_METHOD_DEFINITION_BROADCAST.substitute(env))
 
         method_of = ['Type']
-        if is_method:
-            top_env['tensor_method_declarations'].append(
-                TENSOR_METHOD_DECLARATION.substitute(env))
-            top_env['tensor_method_definitions'].append(
-                TENSOR_METHOD_DEFINITION.substitute(env))
-            method_of.append('Tensor')
-
         if is_namespace_function:
-            option['inferred_type'] = 'infer_type({})'.format(dispatch_tensor)
+            option['inferred_type'] = 'detail::infer_type({})'.format(dispatch_tensor)
             top_env['function_declarations'].append(
                 FUNCTION_DECLARATION.substitute(env))
             top_env['function_definitions'].append(
@@ -748,18 +910,26 @@ def create_generic(top_env, declarations):
 
         buffer_names = [buffer['name'] for buffer in option.get('buffers', [])]
 
-        output_options.append(OrderedDict([
-            ('name', option['api_name']),
-            ('method_prefix_derived', option['method_prefix_derived']),
-            ('arguments', formals),
-            ('method_of', method_of),
-            ('mode', mode),
-            ('buffers', buffer_names),
-            ('returns', option['returns']),
-            ('inplace', option['inplace']),
+        output_options.append(OutputDeclaration(
+            name=option['api_name'],
+            matches_jit_signature=option['matches_jit_signature'],
+            schema_string=option['schema_string'],
+            method_prefix_derived=option['method_prefix_derived'],
+            arguments=formals,
+            method_of=method_of,
+            mode=mode,
+            python_module=option.get('python_module', ''),
+            buffers=buffer_names,
+            returns=option['returns'],
+            inplace=option['inplace'],
+            is_factory_method=False,
             # See Note [Abstract ATen methods]
-            ('abstract', abstract),
-        ]))
+            abstract=abstract,
+            requires_tensor=option.get('requires_tensor', False),
+            device_guard=option.get('device_guard', True),
+            with_gil=option.get('with_gil', False),
+            deprecated=option.get('deprecated', False)
+        ))
 
     def native_get_formals(option, include_constants=False):
         # type: (FunctionOption, bool) -> List[AtFormal]
@@ -768,7 +938,7 @@ def create_generic(top_env, declarations):
         kwd_args = []
 
         def insert(argument):
-            # type: (NativeFormal) -> None
+            # type: (AtFormal) -> None
             if argument['name'] not in seen:
                 seen.add(argument['name'])
                 if argument.get('kwarg_only', False):
@@ -781,24 +951,30 @@ def create_generic(top_env, declarations):
 
         # not clear we need dynamic_type translation as we can specify the correct type
         # directly in native functions
-        def add_type_as_dynamic_type(argument, option):
-            # type: (NativeFormal, FunctionOption) -> NativeFormal
-            argument['dynamic_type'] = argument['type']
+        def add_dynamic_type(argument, option):
+            # type: (AtFormal, FunctionOption) -> AtFormal
+            argument['dynamic_type'] = NATIVE_DYNAMIC_TYPE.get(argument['type'], argument['type'])
             return argument
 
         result = pos_args + kwd_args
-        result = [add_type_as_dynamic_type(argument, option) for argument in result]
+        result = [add_dynamic_type(argument, option) for argument in result]
 
         # ensure we get reference-type formals when appropriate
         def native_translate_formals(argument, option):
-            # type: (NativeFormal, FunctionOption) -> AtFormal
+            # type: (AtFormal, FunctionOption) -> AtFormal
             def translate_map(const):
                 # type: (bool) -> Dict[str, str]
                 return {
                     'Tensor': 'const Tensor &' if const else 'Tensor &',
                     'BoolTensor': 'const Tensor &' if const else 'Tensor &',
                     'IndexTensor': 'const Tensor &' if const else 'Tensor &',
+                    'Type': 'const Type &' if const else 'Type &',
+                    'TensorOptions': 'const TensorOptions &' if const else 'TensorOptions &',
+                    'TensorList': 'TensorList',
                 }
+
+            if argument.get('is_nullable') and argument['type'] not in translate_map(False).keys():
+                argument['type'] = "c10::optional<{}>".format(argument['type'])
 
             if (option['inplace'] and argument['name'] == 'self') or argument.get('output', False):
                 argument['type'] = translate_map(False).get(argument['type'], argument['type'])
@@ -817,12 +993,19 @@ def create_generic(top_env, declarations):
 
         return_types = []  # List[ReturnType]
         for t_raw in ret:
+            # See Note [field_name versus name]
+            field_name = None
             if isinstance(t_raw, string_type):
                 t = t_raw
+                name = None
+            elif t_raw is None:
+                t = 'void'
                 name = None
             else:
                 t = t_raw['type']
                 name = t_raw['name']
+                if 'field_name' in t_raw:
+                    field_name = t_raw['field_name']
 
             # can't actually return a TensorList (since it's a reference object)
             actual_return_type = {'TensorList': 'std::vector<Tensor>'}.get(t, t)
@@ -833,18 +1016,21 @@ def create_generic(top_env, declarations):
 
             rtype = {
                 'type': actual_return_type,
-                'dynamic_type': t,
+                'dynamic_type': NATIVE_DYNAMIC_TYPE.get(t, t),
             }  # type: ReturnType
             if name is not None:
                 rtype['name'] = name
+            if field_name is not None:
+                rtype['field_name'] = field_name
             return_types.append(rtype)
 
         return return_types
 
     def process_native(option, output_options):
-        # type: (FunctionOption, List[OrderedDict]) -> None
-        option['inplace'] = re.search(
-            '(^__i|[^_]_$)', option['api_name']) is not None
+        # type: (FunctionOption, List[OutputDeclaration]) -> None
+        assert option['python_module'] == '' or option['python_module'] == 'nn', \
+            "Found python_module of {} for decl {}, but only \'\' string or \'nn\' are supported".format(
+                option['python_module'], option['name'])
 
         formals = native_get_formals(option)
         option['formals_list'] = formals
@@ -862,14 +1048,38 @@ def create_generic(top_env, declarations):
         option['method_actuals'] = [
             f['name'] if f['name'] != 'self' else '*this' for f in formals]
 
+        def find_formal(formal_name, formals):
+            for formal in formals:
+                if formal_name == formal['dynamic_type']:
+                    return formal
+            return None
+
+        assert find_formal('Type', formals) is None, \
+            "Found Type argument in {}({}). Use TensorOptions instead.".format(
+                option['name'], ", ".join(option['method_formals_with_defaults']))
+
+        type_method_dispatch = option['type_method_definition_dispatch']
+
+        dispatch_options = find_formal('TensorOptions', formals)
+        # Only dispatch via tensor if there is no Options argument
+        dispatch_tensor = None if dispatch_options else find_dispatch_tensor(formals)
+
+        option['type_method_formals'] = [format_formal(f) for f in formals]
+        option['type_method_actuals'] = [f['name'] for f in formals]
+        option['native_actuals'] = [f['name'] for f in formals]
+
         option['const_mark'] = '' if option['inplace'] else ' const'
 
         is_method = 'method' in option['variants']
-        is_function = 'function' in option['variants']
-        dispatch_tensor = find_dispatch_tensor(formals)
-        is_namespace_function = is_function and dispatch_tensor is not None
+        is_namespace_function = 'function' in option['variants']
+        is_factory_method = find_formal('TensorOptions', formals) and \
+            not dispatch_options and 'method' not in option['variants']
+
+        check_methods_do_not_start_with_underscore(option['name'], is_method)
 
         option['method_prefix_derived'] = ''
+        option['device_guard_declaration'] = device_guard(option, formals, dispatch_options, dispatch_tensor)
+
         env = nested_dict(option, top_env)
 
         broadcast_arg = get_broadcast_argument(option)
@@ -877,10 +1087,14 @@ def create_generic(top_env, declarations):
             raise Exception("broadcasting is not yet supported for native functions, "
                             "but specified for function {}", option['name'])
 
-        top_env['type_method_declarations'].append(
-            TYPE_METHOD_DECLARATION_CONCRETE.substitute(env))
-        dispatch = option['type_method_definition_dispatch']
-        option['native_type_method_dispatch'] = dispatch
+        if option['extended_method']:
+            top_env['pure_virtual_extended_type_method_declarations'].append(
+                PURE_VIRTUAL_TYPE_METHOD_DECLARATION.substitute(env))
+        else:
+            top_env['pure_virtual_type_method_declarations'].append(
+                PURE_VIRTUAL_TYPE_METHOD_DECLARATION.substitute(env))
+        top_env['type_method_declarations'].append(TYPE_METHOD_DECLARATION_CONCRETE.substitute(env))
+        option['native_type_method_dispatch'] = type_method_dispatch
 
         # Note [Abstract ATen methods]
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -890,22 +1104,22 @@ def create_generic(top_env, declarations):
         # method is one which has the same dispatch for all types;
         # we just implement it in the base Type.  This is exposed
         # in Declarations.yaml via a field named 'abstract'.
-        if isinstance(dispatch, dict):
+        abstract = False
+        if isinstance(type_method_dispatch, dict):
             abstract = True
             top_env['type_method_definitions'].append(
                 TYPE_METHOD_DEFINITION_ABSTRACT.substitute(env))
         else:
-            abstract = False
             body = TYPE_DEFINITION_BODY_NATIVE.substitute(env)
             top_env['type_method_definitions'].append(
                 TYPE_METHOD_DEFINITION_CONCRETE.substitute(
                     env, type_definition_body=body))
 
         # generate the at::native function declarations (i.e. what the user will implement)
-        if isinstance(dispatch, dict):
+        if isinstance(type_method_dispatch, dict):
             generated_native_functions = []  # type: List[str]
-            for key in sorted(dispatch.keys()):
-                value = dispatch[key]
+            for key in sorted(type_method_dispatch.keys()):
+                value = type_method_dispatch[key]
                 if value not in generated_native_functions:
                     option['native_type_method_dispatch'] = value
                     top_env['native_function_declarations'].append(
@@ -924,29 +1138,45 @@ def create_generic(top_env, declarations):
             method_of.append('Tensor')
 
         if is_namespace_function:
-            option['inferred_type'] = 'infer_type({})'.format(dispatch_tensor)
-            top_env['function_declarations'].append(
-                FUNCTION_DECLARATION.substitute(env))
-            top_env['function_definitions'].append(
-                FUNCTION_DEFINITION.substitute(env))
+            if dispatch_tensor:
+                option['inferred_type'] = 'detail::infer_type({})'.format(dispatch_tensor)
+            elif dispatch_options:
+                option['inferred_type'] = 'at::getType({})'.format(dispatch_options['name'])
+            else:
+                # doesn't depend on a specific type, use undefined float
+                option['inferred_type'] = 'at::getNonVariableType(at::Backend::Undefined, at::ScalarType::Float)'
+            declaration = DEPRECATED_FUNCTION_DECLARATION if option['deprecated'] else FUNCTION_DECLARATION
+            top_env['function_declarations'].append(declaration.substitute(env))
+            top_env['function_definitions'].append(FUNCTION_DEFINITION.substitute(env))
             method_of.append('namespace')
 
-        output_options.append(OrderedDict([
-            ('name', option['api_name']),
-            ('method_prefix_derived', option['method_prefix_derived']),
-            ('arguments', formals),
-            ('method_of', method_of),
-            ('mode', option['mode']),
-            ('returns', option['returns']),
-            ('inplace', option['inplace']),
+        output_options.append(OutputDeclaration(
+            name=option['api_name'],
+            matches_jit_signature=option["matches_jit_signature"],
+            schema_string=option["schema_string"],
+            method_prefix_derived=option['method_prefix_derived'],
+            arguments=formals,
+            method_of=method_of,
+            mode=option['mode'],
+            python_module=option['python_module'],
+            buffers=None,
+            returns=option['returns'],
+            inplace=option['inplace'],
+            is_factory_method=is_factory_method,
             # See Note [Abstract ATen methods]
-            ('abstract', abstract),
-        ]))
+            abstract=abstract,
+            requires_tensor=option.get('requires_tensor', False),
+            device_guard=option.get('device_guard', True),
+            with_gil=option.get('with_gil', False),
+            deprecated=option['deprecated'],
+        ))
 
-    output_declarations = []  # type: List[OrderedDict]
+    output_declarations = []  # type: List[OutputDeclaration]
     for declaration in declarations:
-        output_options = []  # type: List[OrderedDict]
+        output_options = []  # type: List[OutputDeclaration]
         for option in declaration['options']:
+            option["matches_jit_signature"] = declaration["matches_jit_signature"]
+            option["schema_string"] = declaration["schema_string"]
             try:
                 if option['mode'] != 'native':
                     process_option(option, output_options)
@@ -955,6 +1185,7 @@ def create_generic(top_env, declarations):
             except NYIError:
                 option['skip'] = True
         output_declarations.extend(output_options)
+
     return output_declarations
 
 
@@ -965,8 +1196,6 @@ def create_derived(backend_type_env, declarations):
 
     is_cuda = 'CUDA' in backend_type_env['Backend']
 
-    real_is_half = backend_type_env['ScalarName'] == 'Half'
-
     def replace_with_null(argument):
         # type: (THFormal) -> bool
         return (argument['type'] == 'THGenerator*' and
@@ -974,7 +1203,7 @@ def create_derived(backend_type_env, declarations):
 
     def requires_checked_cast(argument):
         # type: (THFormal) -> bool
-        if argument['type'] == 'IntList':
+        if argument['type'] == 'IntArrayRef':
             return 'size' in argument
         return argument['type'] in CHECKED_CAST
 
@@ -993,8 +1222,6 @@ def create_derived(backend_type_env, declarations):
         elif requires_checked_cast(argument):
             checked_use = CHECKED_USE.get(
                 argument['type'], '{}_').format(argument['name'])
-            if real_is_half and argument['type'] == 'real':
-                checked_use = HALF_CONVERSION.substitute(value=checked_use)
             if nullable_argument(argument):
                 checked_use = CHECKED_USE_NULLABLE.substitute(
                     env={}, arg_name=argument['name'], usage=checked_use)
@@ -1023,6 +1250,9 @@ def create_derived(backend_type_env, declarations):
 
     def drop_argument(argument, option):
         # type: (THFormal, FunctionOption) -> bool
+        # Devices are handled in the body of the function.
+        if argument['name'] == 'device':
+            return True
         return 'CUDA' in backend_type_env['Backend'] and (
             option['mode'] == 'TH' and argument['type'] == 'THGenerator*')
 
@@ -1041,24 +1271,28 @@ def create_derived(backend_type_env, declarations):
             return backend_type_env['AccScalarName'] == 'Long'
         return False
 
-    def get_zero_dim_dispatch_when_scalar(option):
-        # type: (FunctionOption) -> str
-        return option.get('zero_dim_dispatch_when_scalar', False)  # type: ignore
-
     def handle_zero_dim(env, option):
         # type: (Environment, FunctionOption) -> List[str]
-        zero_dim_dispatch = get_zero_dim_dispatch_when_scalar(option)
+        zero_dim_dispatch = option.get('zero_dim_dispatch_when_scalar', '')
         if not zero_dim_dispatch:
             return []
+        broadcasts_arg = zero_dim_dispatch in option.get('broadcast_actuals', '')
+        zero_dim_only = option.get('zero_dim_tensor_only', False)
+        # this combination doesn't seem to make sense
+        assert not (broadcasts_arg and zero_dim_only)
+        # if the argument broadcasts, then this would only affect cases where all broadcasted
+        # tensors were zero-dim, which is inconsistent with the scalar handling.
+        if broadcasts_arg:
+            return []
         zero_dim_actuals = [arg['name']
-                            if arg['name'] != zero_dim_dispatch else "Scalar({})".format(arg['name'])
+                            if arg['name'] != zero_dim_dispatch else "{}.item()".format(arg['name'])
                             for arg in option['formals_list']]
         return [ZERO_DIM_CHECK.substitute(env, check_name=zero_dim_dispatch, zero_dim_actuals=zero_dim_actuals)]
 
     def handle_only_zero_dim(env, option):
-        # type: (Environment, FunctionOption) -> List[str]
+        # type: (Environment, FunctionOption) -> Optional[List[str]]
         if option.get('zero_dim_tensor_only', False):
-            check_name = get_zero_dim_dispatch_when_scalar(option)
+            check_name = option['zero_dim_dispatch_when_scalar']
             return [ZERO_DIM_ONLY.substitute(env, check_name=check_name)]
         else:
             return None
@@ -1069,22 +1303,26 @@ def create_derived(backend_type_env, declarations):
             return []
         check_name = option['when_sparse_dispatch']
         sparse_actuals = [arg['name']
-                          if arg['name'] != check_name else "SparseTensor({})".format(arg['name'])
+                          if arg['name'] != check_name else "SparseTensorRef({})".format(arg['name'])
                           for arg in option['formals_list']]
         return [SPARSE_CHECK.substitute(env, check_name=check_name, sparse_actuals=sparse_actuals)]
 
     def allocate_arg(env, arg, output_count):
         # type: (Environment, THFormal, int) -> List[str]
         name = arg['name']
-        allocation = CodeTemplate(ALLOC_WRAP[arg['type']]).substitute(env, arguments=[])
+        state = ''
+        if is_cuda:
+            state = 'globalContext().getTHCState()'
+        allocation = CodeTemplate(ALLOC_NOARGS_WRAP[arg['type']]).substitute(env)
         tensor_arg = '{}_'.format(name)
         if arg.get('mask', False):
             allocation = 'output_mask[{}] ? {} : nullptr'.format(output_count, allocation)
-            tensor_arg = ('{}_ == nullptr ? (TensorImpl*)UndefinedTensor::singleton() : (TensorImpl*){}_'
+            tensor_arg = ('{}_ == nullptr ? (TensorImpl*)UndefinedTensorImpl::singleton() : (TensorImpl*){}_'
                           .format(name, name))
+        intrusive_ptr_type = 'c10::intrusive_ptr<TensorImpl, UndefinedTensorImpl>'
         return [
             'auto {}_ = {};'.format(name, allocation),
-            'auto {} = Tensor({}, false);'.format(name, tensor_arg),
+            'auto {} = Tensor({}::reclaim({}));'.format(name, intrusive_ptr_type, tensor_arg),
         ]
 
     def resize_arg(arg):
@@ -1105,7 +1343,7 @@ def create_derived(backend_type_env, declarations):
         is_nn = option['mode'] == 'NN'
         actuals = get_arguments(cimpl['arguments'], option)
         if is_cuda or is_nn:
-            actuals = ['context->thc_state'] + actuals
+            actuals = ['globalContext().getTHCState()'] + actuals
 
         cname = cimpl['cname']
         if option.get('sparse', False):
@@ -1142,7 +1380,7 @@ def create_derived(backend_type_env, declarations):
         output_count = 0
 
         # scalar_check is the heuristic conditions when a result may be a scalar_check
-        # if there is a THSize* argument, then its dimensions are used to determine scalar.
+        # if there is a IntArrayRefSize argument, then its dimensions are used to determine scalar.
         # otherwise, it is true if all the input tensors are scalars,
         scalar_check_is_from_size = False
         scalar_check_is_from_option = False
@@ -1158,7 +1396,7 @@ def create_derived(backend_type_env, declarations):
         for arg in option['arguments']:
             if is_real_argument_to_wrapper(arg):
                 count += 1
-            if arg['type'] == 'THSize*' and not scalar_check_is_from_option:
+            if arg['type'] == 'IntArrayRefSize' and not scalar_check_is_from_option:
                 scalar_check_is_from_size = True
                 scalar_check = '{}.size() == 0'.format(arg['name'])
             if arg['type'] == 'TensorList':
@@ -1192,12 +1430,10 @@ def create_derived(backend_type_env, declarations):
                     if 'default_init' in arg:
                         default_init.append(arg['default_init'])
 
-                    noelem_to_empty = 'is_noelem_tensor_size(size)' if 'size' in seen_names else 'false'
                     check_cast = CHECKED_CAST[arg['type']].substitute(
                         env, arg_name=arg['name'], arg_pos=count,
                         null_okay=null_okay, default_init=default_init,
-                        size=arg.get('size'),
-                        noelem_to_empty=noelem_to_empty)
+                        size=arg.get('size'))
                     body.append("auto {}_ = {};".format(
                         arg['name'], check_cast))
                 if drop_argument(arg, option) or replace_with_null(arg):
@@ -1223,16 +1459,16 @@ def create_derived(backend_type_env, declarations):
                 else:
                     body += initializers
 
-                # for out-of-place: isScalar() for all input tensors is and'd to form
+                # for out-of-place: dim() == 0 for all input tensors is and'd to form
                 # the test for whether the output is also a scalar
-                # for in-place: isScalar() shouldn't change as a result of the operation
+                # for in-place: dim() == 0 shouldn't change as a result of the operation
                 if (not arg.get('output') and 'Tensor' in arg['type'] and
                         'TensorList' not in arg['type'] and
                         'THS' not in arg['type'] and
                         not scalar_check_is_from_size and
                         not scalar_check_is_from_option and
                         not option['inplace']):
-                    check = '{}->isScalar()'.format(arg['name'] + '_')
+                    check = '{}->dim() == 0'.format(arg['name'] + '_')
                     if nullable_argument(arg):
                         check = '(!{} || {})'.format(arg['name'] + '_', check)
                     scalar_check = (check if scalar_check is None
@@ -1265,7 +1501,7 @@ def create_derived(backend_type_env, declarations):
                     scalar_check_arg = (scalar_check if not isinstance(scalar_check, dict)
                                         else scalar_check.get(arg['name']))  # type: ignore
                     if scalar_check_arg is not None:
-                        stmt = "{}_->maybeScalar({});".format(arg['name'], scalar_check_arg)
+                        stmt = "{}_->maybe_zero_dim({});".format(arg['name'], scalar_check_arg)
                         if nullable_argument(arg):
                             stmt = "if ({}_) {}".format(arg['name'], stmt)
                         body.append(stmt)
@@ -1289,20 +1525,23 @@ def create_derived(backend_type_env, declarations):
                     option['aten_custom_call']).substitute(env))
 
             if ret['type'] in ALLOC_WRAP.keys():
-                maybe_scalar = "->maybeScalar({})".format(scalar_check) \
+                maybe_scalar = "->maybe_zero_dim({})".format(scalar_check) \
                                if scalar_check is not None \
                                else ""
                 wrapped_tensor = CodeTemplate(ALLOC_WRAP[ret['type']]).substitute(
                     env, arguments=[call])
-                return_tensor = "return Tensor((${wrapped_tensor})${maybe_scalar},false);"
+                return_tensor = (
+                    "return Tensor(" +
+                    "c10::intrusive_ptr<TensorImpl, UndefinedTensorImpl>::reclaim(" +
+                    "(${wrapped_tensor})${maybe_scalar}));")
                 body.append(CodeTemplate(return_tensor).substitute(
                     env, wrapped_tensor=wrapped_tensor, maybe_scalar=maybe_scalar))
             # return the same underlying Tensor type for both real and accreal; this ensures
-            # e.g. x.sum(0) and x.sum() return the same type.
+            # e.g. x.sum(0) and x.sum() return the same type. We explicitly cast to the
+            # ScalarType before constructing the scalar_tensor to avoid overflow checking.
             elif ret['type'] == 'accreal' or ret['type'] == 'real':
-                if real_is_half:
-                    call = 'convert<Half>({})'.format(call)
-                body.append('return scalarTensor({});'.format(call))
+                return_scalar = 'return at::scalar_tensor(convert<${ScalarType}>(${call}), options());'
+                body.append(CodeTemplate(return_scalar).substitute(env, call=call))
             else:
                 # we using int64_t for long in the API, so correct it here...
                 if is_actual_return_long(ret):
@@ -1335,14 +1574,15 @@ def create_derived(backend_type_env, declarations):
                     backend_type_env['ScalarName'])
             if pair in option['backend_type_pairs']:
                 native_dispatch = dispatch.get(pair[0])
-                if native_dispatch is None:
-                    raise Exception('could not find backend {} in native function dispatch specification {}'
-                                    .format(pair[0], dispatch))
-                option['native_type_method_dispatch'] = native_dispatch
                 type_object_declarations.append(
                     TYPE_DERIVED_DECLARATION.substitute(env))
-                type_object_definitions.append(
-                    TYPE_DERIVED_DEFINITION_NATIVE.substitute(env))
+                if native_dispatch is None:
+                    type_object_definitions.append(
+                        TYPE_DERIVED_DEFINITION_NATIVE_MISSING.substitute(env))
+                else:
+                    option['native_type_method_dispatch'] = native_dispatch
+                    type_object_definitions.append(
+                        TYPE_DERIVED_DEFINITION_NATIVE.substitute(env))
 
     for declaration in declarations:
         for option in declaration['options']:
@@ -1354,6 +1594,31 @@ def create_derived(backend_type_env, declarations):
                         process_option(option)
                     else:
                         process_native(option)
+                except NYIError:
+                    pass
+    return type_object_declarations, type_object_definitions
+
+
+def create_extension_backend(backend_type_env, declarations):
+    # type: (Environment, List[FunctionOption]) -> Tuple[List[str], List[str]]
+    type_object_declarations = []
+    type_object_definitions = []
+
+    for declaration in declarations:
+        for option in declaration['options']:
+            if not option.get('skip', False):
+                try:
+                    option['formals_types'] = [f['type'] for f in option['formals_list']]
+                    option['native_actuals'] = [f['name'] for f in option['formals_list']]
+                    schema_args = ", ".join(
+                        ["{} {}".format(f['dynamic_type'], f['name']) for f in option['formals_list']])
+                    return_type = NATIVE_DYNAMIC_TYPE.get(option['return_type'], option['return_type'])
+                    option['schema'] = "{}({}) -> {}".format(option['api_name'], schema_args, return_type)
+                    env = nested_dict(option, backend_type_env)
+                    type_object_declarations.append(
+                        TYPE_DERIVED_DECLARATION.substitute(env))
+                    type_object_definitions.append(
+                        TYPE_DEFINITION_EXTENSION_BACKEND.substitute(env))
                 except NYIError:
                     pass
     return type_object_declarations, type_object_definitions

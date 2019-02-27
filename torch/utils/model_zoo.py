@@ -1,5 +1,7 @@
+from __future__ import absolute_import, division, print_function, unicode_literals
 import torch
 
+import errno
 import hashlib
 import os
 import re
@@ -9,7 +11,7 @@ import tempfile
 
 try:
     from requests.utils import urlparse
-    import requests.get as urlopen
+    from requests import get as urlopen
     requests_available = True
 except ImportError:
     requests_available = False
@@ -39,7 +41,7 @@ def load_url(url, model_dir=None, map_location=None, progress=True):
 
     The default value of `model_dir` is ``$TORCH_HOME/models`` where
     ``$TORCH_HOME`` defaults to ``~/.torch``. The default directory can be
-    overriden with the ``$TORCH_MODEL_ZOO`` environment variable.
+    overridden with the ``$TORCH_MODEL_ZOO`` environment variable.
 
     Args:
         url (string): URL of the object to download
@@ -54,8 +56,17 @@ def load_url(url, model_dir=None, map_location=None, progress=True):
     if model_dir is None:
         torch_home = os.path.expanduser(os.getenv('TORCH_HOME', '~/.torch'))
         model_dir = os.getenv('TORCH_MODEL_ZOO', os.path.join(torch_home, 'models'))
-    if not os.path.exists(model_dir):
+
+    try:
         os.makedirs(model_dir)
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            # Directory already exists, ignore.
+            pass
+        else:
+            # Unexpected OSError, re-raise.
+            raise
+
     parts = urlparse(url)
     filename = os.path.basename(parts.path)
     cached_file = os.path.join(model_dir, filename)
@@ -67,34 +78,42 @@ def load_url(url, model_dir=None, map_location=None, progress=True):
 
 
 def _download_url_to_file(url, dst, hash_prefix, progress):
-    u = urlopen(url)
+    file_size = None
     if requests_available:
-        file_size = int(u.headers["Content-Length"])
+        u = urlopen(url, stream=True)
+        if hasattr(u.headers, "Content-Length"):
+            file_size = int(u.headers["Content-Length"])
         u = u.raw
     else:
+        u = urlopen(url)
         meta = u.info()
         if hasattr(meta, 'getheaders'):
-            file_size = int(meta.getheaders("Content-Length")[0])
+            content_length = meta.getheaders("Content-Length")
         else:
-            file_size = int(meta.get_all("Content-Length")[0])
+            content_length = meta.get_all("Content-Length")
+        if content_length is not None and len(content_length) > 0:
+            file_size = int(content_length[0])
 
     f = tempfile.NamedTemporaryFile(delete=False)
     try:
-        sha256 = hashlib.sha256()
+        if hash_prefix is not None:
+            sha256 = hashlib.sha256()
         with tqdm(total=file_size, disable=not progress) as pbar:
             while True:
                 buffer = u.read(8192)
                 if len(buffer) == 0:
                     break
                 f.write(buffer)
-                sha256.update(buffer)
+                if hash_prefix is not None:
+                    sha256.update(buffer)
                 pbar.update(len(buffer))
 
         f.close()
-        digest = sha256.hexdigest()
-        if digest[:len(hash_prefix)] != hash_prefix:
-            raise RuntimeError('invalid hash value (expected "{}", got "{}")'
-                               .format(hash_prefix, digest))
+        if hash_prefix is not None:
+            digest = sha256.hexdigest()
+            if digest[:len(hash_prefix)] != hash_prefix:
+                raise RuntimeError('invalid hash value (expected "{}", got "{}")'
+                                   .format(hash_prefix, digest))
         shutil.move(f.name, dst)
     finally:
         f.close()
@@ -116,7 +135,10 @@ if tqdm is None:
                 return
 
             self.n += n
-            sys.stderr.write("\r{0:.1f}%".format(100 * self.n / float(self.total)))
+            if self.total is None:
+                sys.stderr.write("\r{0:.1f} bytes".format(self.n))
+            else:
+                sys.stderr.write("\r{0:.1f}%".format(100 * self.n / float(self.total)))
             sys.stderr.flush()
 
         def __enter__(self):

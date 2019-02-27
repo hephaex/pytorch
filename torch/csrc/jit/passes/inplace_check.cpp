@@ -1,17 +1,23 @@
-#include "torch/csrc/jit/passes/inplace_check.h"
+#include <torch/csrc/jit/passes/inplace_check.h>
 
-namespace torch { namespace jit {
+namespace torch {
+namespace jit {
 
-void CheckInplace(std::shared_ptr<Graph>& graph) {
-  for (auto node : graph->nodes()) {
-    if (node->kind() == kPythonOp && node->hasAttribute(kinplace)) {
-      if (node->i(kinplace)) {
-        throw std::runtime_error(std::string("inplace ") +
-                                 static_cast<PythonOp*>(node)->name() +
-                                 " not supported in the JIT");
+void CheckInplace(Block* block) {
+  for (auto node : block->nodes()) {
+    if (node->kind() == prim::PythonOp && node->hasAttribute(attr::inplace)) {
+      if (node->i(attr::inplace)) {
+        throw std::runtime_error(
+            std::string("inplace ") + static_cast<PythonOp*>(node)->name() +
+            " not supported in the JIT");
       }
     }
   }
 }
 
-}} // namespace torch::jit
+void CheckInplace(std::shared_ptr<Graph>& graph) {
+  CheckInplace(graph->block());
+}
+
+} // namespace jit
+} // namespace torch

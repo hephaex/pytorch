@@ -1,10 +1,10 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <vector>
-#include <functional>
 
-#include "torch/csrc/jit/script/lexer.h"
+#include <torch/csrc/jit/script/lexer.h>
 
 namespace torch {
 namespace jit {
@@ -16,7 +16,7 @@ namespace script {
 // for instance the expression a*b+1 is represented as:
 // (+ (* (ident a) (ident b)) (const 1))
 // Atoms like 'a', 'b', and '1' are represented by subclasses of Tree which
-// define stringValue() and doubleValue().
+// define stringValue().
 // Everything else is a Compound object, which has a 'kind' that is a token from
 // Lexer.h's TokenKind enum, and contains a list of subtrees.
 // Like TokenKind single-character operators like '+' are representing using the
@@ -43,14 +43,8 @@ struct Tree : std::enable_shared_from_this<Tree> {
   virtual const SourceRange& range() const {
     throw std::runtime_error("is an Atom");
   }
-  virtual double doubleValue() const {
-    throw std::runtime_error("not a TK_NUMBER");
-  }
   virtual const std::string& stringValue() const {
-    throw std::runtime_error("not a TK_STRING");
-  }
-  virtual bool boolValue() const {
-    throw std::runtime_error("not a TK_BOOL");
+    throw std::runtime_error("stringValue can only be called on TK_STRING");
   }
   virtual const TreeList& trees() const {
     return empty_trees;
@@ -58,7 +52,8 @@ struct Tree : std::enable_shared_from_this<Tree> {
   const TreeRef& tree(size_t i) const {
     return trees().at(i);
   }
-  virtual TreeRef map(std::function<TreeRef(TreeRef)> fn) {
+  virtual TreeRef map(const std::function<TreeRef(TreeRef)>& fn) {
+    (void)fn;
     return shared_from_this();
   }
   template <typename... Args>
@@ -77,33 +72,38 @@ struct Tree : std::enable_shared_from_this<Tree> {
   void matchNumSubtrees(int k, size_t expected_subtrees) {
     return matchNumSubtreesD(k, "unknown", 0, expected_subtrees, false);
   }
-  void matchNumSubtreesD(int k, const char* filename, int lineno,
-                         size_t expected_subtrees, bool allow_more) {
+  void matchNumSubtreesD(
+      int k,
+      const char* filename,
+      int lineno,
+      size_t expected_subtrees,
+      bool allow_more) {
     if (kind() != k) {
       std::stringstream ss;
       ss << filename << ":" << lineno << ": expecting kind '" << kindToString(k)
-         << "' but found '" << kind() << "'\n";
+         << "' but found '" << kindToString(kind()) << "'\n";
       range().highlight(ss);
       throw std::runtime_error(ss.str());
     }
     if (trees().size() < expected_subtrees ||
         (!allow_more && trees().size() != expected_subtrees)) {
       std::stringstream ss;
-      ss << filename << ":" << lineno << ": expected at least " << expected_subtrees
-         << " subtrees, but found only " << trees().size() << "\n";
+      ss << filename << ":" << lineno << ": expected at least "
+         << expected_subtrees << " subtrees, but found only " << trees().size()
+         << "\n";
       range().highlight(ss);
       throw std::runtime_error(ss.str());
     }
   }
-  virtual ~Tree() {}
+  virtual ~Tree() = default;
 
  private:
   int kind_;
 };
 
 struct String : public Tree {
-  String(const std::string& value_) : Tree(TK_STRING), value_(value_) {}
-  virtual const std::string& stringValue() const override {
+  String(std::string value) : Tree(TK_STRING), value_(std::move(value)) {}
+  const std::string& stringValue() const override {
     return value_;
   }
   template <typename... Args>
@@ -114,35 +114,9 @@ struct String : public Tree {
  private:
   std::string value_;
 };
-struct Number : public Tree {
-  Number(double value_) : Tree(TK_NUMBER), value_(value_) {}
-  virtual double doubleValue() const override {
-    return value_;
-  }
-  template <typename... Args>
-  static TreeRef create(Args&&... args) {
-    return std::make_shared<Number>(std::forward<Args>(args)...);
-  }
-
- private:
-  double value_;
-};
-struct Bool : public Tree {
-  Bool(bool value_) : Tree(TK_BOOL), value_(value_) {}
-  virtual double doubleValue() const override {
-    return value_;
-  }
-  template <typename... Args>
-  static TreeRef create(Args&&... args) {
-    return std::make_shared<Bool>(std::forward<Args>(args)...);
-  }
-
- private:
-  bool value_;
-};
 
 static SourceRange mergeRanges(SourceRange c, const TreeList& others) {
-  for (auto t : others) {
+  for (const auto& t : others) {
     if (t->isAtom())
       continue;
     size_t s = std::min(c.start(), t->range().start());
@@ -153,28 +127,32 @@ static SourceRange mergeRanges(SourceRange c, const TreeList& others) {
 }
 
 struct Compound : public Tree {
-  Compound(int kind, const SourceRange& range_) : Tree(kind), range_(range_) {}
+  Compound(int kind, SourceRange range)
+      : Tree(kind), range_(std::move(range)) {}
   Compound(int kind, const SourceRange& range_, TreeList&& trees_)
       : Tree(kind),
         range_(mergeRanges(range_, trees_)),
         trees_(std::move(trees_)) {}
-  virtual const TreeList& trees() const override {
+  const TreeList& trees() const override {
     return trees_;
   }
-  static TreeRef
-  create(int kind, const SourceRange& range_, TreeList&& trees_) {
+  static TreeRef create(
+      int kind,
+      const SourceRange& range_,
+      TreeList&& trees_) {
     return std::make_shared<Compound>(kind, range_, std::move(trees_));
   }
-  virtual bool isAtom() const override {
+  bool isAtom() const override {
     return false;
   }
-  virtual TreeRef map(std::function<TreeRef(TreeRef)> fn) override {
+  TreeRef map(const std::function<TreeRef(TreeRef)>& fn) override {
     TreeList trees_;
     for (auto& t : trees()) {
       trees_.push_back(fn(t));
     }
     return Compound::create(kind(), range(), std::move(trees_));
   }
+
   const SourceRange& range() const override {
     return range_;
   }
@@ -197,15 +175,12 @@ struct pretty_tree {
 
     std::stringstream out;
     switch (t->kind()) {
-      case TK_NUMBER:
-        out << t->doubleValue();
-        break;
       case TK_STRING:
         out << t->stringValue();
         break;
       default:
         out << "(" << kindToString(t->kind());
-        for (auto e : t->trees()) {
+        for (const auto& e : t->trees()) {
           out << " " << get_flat(e);
         }
         out << ")";
@@ -222,7 +197,7 @@ struct pretty_tree {
     }
     std::string k = kindToString(t->kind());
     out << "(" << k;
-    for (auto e : t->trees()) {
+    for (const auto& e : t->trees()) {
       out << "\n" << std::string(indent + 2, ' ');
       print(out, e, indent + 2);
     }
@@ -235,7 +210,7 @@ static inline std::ostream& operator<<(std::ostream& out, pretty_tree t_) {
   return out << std::endl;
 }
 
-static inline std::ostream& operator<<(std::ostream& out, TreeRef t) {
+static inline std::ostream& operator<<(std::ostream& out, const TreeRef& t) {
   return out << pretty_tree(t);
 }
 

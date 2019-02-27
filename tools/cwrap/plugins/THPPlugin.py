@@ -43,7 +43,6 @@ class THPPlugin(CWrapPlugin):
         'float': Template('THPFloatUtils_unpackReal($arg)'),
         'double': Template('THPDoubleUtils_unpackReal($arg)'),
         'real': Template('THPUtils_(unpackReal)($arg)'),
-        'accreal': Template('THPUtils_(unpackAccreal)($arg)'),
     }
 
     TYPE_CHECK = {
@@ -82,7 +81,6 @@ class THPPlugin(CWrapPlugin):
         'float': Template('THPFloatUtils_checkReal($arg)'),
         'double': Template('THPDoubleUtils_checkReal($arg)'),
         'real': Template('THPUtils_(checkReal)($arg)'),
-        'accreal': Template('THPUtils_(checkAccreal)($arg)'),
     }
 
     SIZE_VARARG_CHECK = Template('THPUtils_tryUnpackLongVarArgs(args, $idx, __size)')
@@ -99,7 +97,6 @@ class THPPlugin(CWrapPlugin):
         'long': Template('return PyInt_FromLong($result);'),
         'int64_t': Template('return PyInt_FromLong($result);'),
         'int': Template('return PyLong_FromLong($result);'),
-        'accreal': Template('return THPUtils_(newAccreal)($result);'),
         'self': Template('Py_INCREF(self);\nreturn (PyObject*)self;'),
         'real': Template('return THPUtils_(newReal)($result);'),
     }
@@ -540,7 +537,7 @@ ${cpu}
             generated = '#if !defined(TH_REAL_IS_HALF) && !IS_DISTRIBUTED\n' + generated + '\n#endif\n\n'
         return generated
 
-    def process_full_file(self, code):
+    def process_full_file(self, code, template_path):
         # We have to find a place before all undefs
         idx = code.find('// PUT DEFINITIONS IN HERE PLEASE')
         return (code[:idx] +
