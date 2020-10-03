@@ -65,9 +65,11 @@ class MeanOp final : public Operator<Context> {
   bool RunOnDevice() override {
     if (Input(0).template IsType<float>()) {
       return DoRunWithType<float>();
+    } else if (Input(0).template IsType<double>()) {
+      return DoRunWithType<double>();
     } else {
       CAFFE_THROW(
-          "Mean operator only supports 32-bit float, but",
+          "Mean operator only supports 32-bit float or 64-bit double, but",
           " input was of type ",
           Input(0).dtype().name());
     }
@@ -79,8 +81,9 @@ class MeanGradientOp : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
 
-  MeanGradientOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<Context>(operator_def, ws) {}
+  template <class... Args>
+  explicit MeanGradientOp(Args&&... args)
+      : Operator<Context>(std::forward<Args>(args)...) {}
 
   template <typename T>
   bool DoRunWithType() {
@@ -110,9 +113,11 @@ class MeanGradientOp : public Operator<Context> {
   bool RunOnDevice() override {
     if (Input(0).template IsType<float>()) {
       return DoRunWithType<float>();
+    } else if (Input(0).template IsType<double>()) {
+      return DoRunWithType<double>();
     } else {
       CAFFE_THROW(
-          "Mean operator only supports 32-bit float, but",
+          "Mean operator only supports 32-bit float or 64-bit double, but",
           " input was of type ",
           Input(0).dtype().name());
     }

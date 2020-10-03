@@ -15,8 +15,9 @@ class AffineChannelOp final : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
 
-  AffineChannelOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<Context>(operator_def, ws),
+  template <class... Args>
+  explicit AffineChannelOp(Args&&... args)
+      : Operator<Context>(std::forward<Args>(args)...),
         order_(StringToStorageOrder(
             this->template GetSingleArgument<std::string>("order", "NCHW"))),
         OP_SINGLE_ARG(bool, "is_learnable", is_learnable_, false) {
@@ -70,8 +71,7 @@ class AffineChannelOp final : public Operator<Context> {
     const int N = X.dim32(0);
     const int C = X.dim32(ndim - 1);
     const int HxW = X.numel() / (N * C);
-    auto* Y =
-        Output(0, X.sizes(), at::dtype<T>());
+    auto* Y = Output(0, X.sizes(), at::dtype<T>());
     math::AffineChannel<T, Context, StorageOrder::NHWC>(
         N,
         C,
@@ -94,8 +94,9 @@ class AffineChannelGradientOp final : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
 
-  AffineChannelGradientOp(const OperatorDef& def, Workspace* ws)
-      : Operator<Context>(def, ws),
+  template <class... Args>
+  explicit AffineChannelGradientOp(Args&&... args)
+      : Operator<Context>(std::forward<Args>(args)...),
         order_(StringToStorageOrder(
             this->template GetSingleArgument<std::string>("order", "NCHW"))),
         OP_SINGLE_ARG(bool, "is_learnable", is_learnable_, false) {

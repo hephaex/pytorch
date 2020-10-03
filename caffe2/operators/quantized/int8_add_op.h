@@ -15,9 +15,8 @@ namespace int8 {
 template <Activation Ac>
 class Int8AddOp final : public Operator<CPUContext> {
  public:
-  Int8AddOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<CPUContext>(operator_def, ws),
-        ws_(ws) {}
+  explicit Int8AddOp(const OperatorDef& operator_def, Workspace* ws)
+      : Operator<CPUContext>(operator_def, ws), ws_(ws) {}
 
   ~Int8AddOp() {
     if (this->qnnpackOperator_ != nullptr) {
@@ -48,9 +47,8 @@ class Int8AddOp final : public Operator<CPUContext> {
     const float B_scale = B.scale;
 
     const int32_t Y_zero_point =
-      this->template GetSingleArgument<int>("Y_zero_point", 0);
-    const float Y_scale =
-      this->template GetSingleArgument<float>("Y_scale", 1);
+        this->template GetSingleArgument<int>("Y_zero_point", 0);
+    const float Y_scale = this->template GetSingleArgument<float>("Y_scale", 1);
     Y->t.ResizeLike(A.t);
     Y->zero_point = Y_zero_point;
     Y->scale = Y_scale;
@@ -62,14 +60,17 @@ class Int8AddOp final : public Operator<CPUContext> {
 
     if (this->qnnpackOperator_ == nullptr) {
       const qnnp_status createStatus = qnnp_create_add_nc_q8(
-        1 /* channels */,
-        A_zero_point, A_scale,
-        B_zero_point, B_scale,
-        static_cast<uint8_t>(Y_zero_point), Y_scale,
-        activationLimits(Y_scale, Y_zero_point, Ac).first,
-        activationLimits(Y_scale, Y_zero_point, Ac).second,
-        0 /* flags */,
-        &qnnpackOperator_);
+          1 /* channels */,
+          A_zero_point,
+          A_scale,
+          B_zero_point,
+          B_scale,
+          static_cast<uint8_t>(Y_zero_point),
+          Y_scale,
+          activationLimits(Y_scale, Y_zero_point, Ac).first,
+          activationLimits(Y_scale, Y_zero_point, Ac).second,
+          0 /* flags */,
+          &qnnpackOperator_);
       CAFFE_ENFORCE(
           createStatus == qnnp_status_success,
           "failed to create QNNPACK add operator");
@@ -89,7 +90,7 @@ class Int8AddOp final : public Operator<CPUContext> {
         setupStatus == qnnp_status_success,
         "failed to setup QNNPACK add operator");
 
-#ifdef FBCODE_CAFFE2
+#if defined(FBCODE_CAFFE2) || !defined(USE_INTERNAL_PTHREADPOOL_IMPL)
     const qnnp_status runStatus =
         qnnp_run_operator(this->qnnpackOperator_, nullptr /* thread pool */);
 #else
@@ -97,8 +98,7 @@ class Int8AddOp final : public Operator<CPUContext> {
         qnnp_run_operator(this->qnnpackOperator_, threadpool);
 #endif
     CAFFE_ENFORCE(
-        runStatus == qnnp_status_success,
-        "failed to run QNNPACK add operator");
+        runStatus == qnnp_status_success, "failed to run QNNPACK add operator");
 
     return true;
   }

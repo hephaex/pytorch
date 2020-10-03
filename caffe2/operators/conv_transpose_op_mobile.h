@@ -3,11 +3,7 @@
 
 #include "caffe2/core/common.h"
 
-#ifndef C10_MOBILE
-#error "mobile build state not defined"
-#endif
-
-#if C10_MOBILE
+#ifdef C10_MOBILE
 
 #include "caffe2/core/context.h"
 #include "caffe2/core/operator.h"
@@ -21,7 +17,9 @@ class ConvTransposeMobileOp final : public ConvTransposeUnpoolBase<Context> {
   USE_CONV_TRANSPOSE_UNPOOL_BASE_FUNCTIONS(Context);
   ConvTransposeMobileOp(const OperatorDef& operator_def, Workspace* ws)
       : ConvTransposeUnpoolBase<Context>(operator_def, ws) {
-    OPERATOR_NEEDS_FEATURE(order_ == StorageOrder::NCHW, "Only NCHW order is supported right now.");
+    OPERATOR_NEEDS_FEATURE(
+        order_ == StorageOrder::NCHW,
+        "Only NCHW order is supported right now.");
     OPERATOR_NEEDS_FEATURE(
         this->pad_l() == 0, "operator does not handle row width padding");
     OPERATOR_NEEDS_FEATURE(
@@ -33,8 +31,8 @@ class ConvTransposeMobileOp final : public ConvTransposeUnpoolBase<Context> {
   bool RunOnDeviceWithOrderNHWC() override;
 
  private:
-  // We store a numThreasds per-worker  tiles of Y, and numThreads per-worker threadBuffer for the
-  // gemm output, laid out in that order.
+  // We store a numThreasds per-worker  tiles of Y, and numThreads per-worker
+  // threadBuffer for the gemm output, laid out in that order.
   Tensor threadBuffer_{CPU};
 
   // Input: X, W, b

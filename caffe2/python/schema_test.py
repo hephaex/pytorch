@@ -1,7 +1,7 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+
+
+
+
 
 from caffe2.python import core, schema
 import numpy as np
@@ -25,6 +25,16 @@ class TestDB(unittest.TestCase):
 
     def testListSubclassClone(self):
         class Subclass(schema.List):
+            pass
+
+        s = Subclass(schema.Scalar())
+        clone = s.clone()
+        self.assertIsInstance(clone, Subclass)
+        self.assertEqual(s, clone)
+        self.assertIsNot(clone, s)
+
+    def testListWithEvictedSubclassClone(self):
+        class Subclass(schema.ListWithEvicted):
             pass
 
         s = Subclass(schema.Scalar())
@@ -114,6 +124,20 @@ class TestDB(unittest.TestCase):
         )
         self.assertEquals(s['field2:lengths'], a.lengths)
         self.assertEquals(s['field2:values'], a.items)
+        with self.assertRaises(KeyError):
+            s['fields2:items:non_existent']
+        with self.assertRaises(KeyError):
+            s['fields2:non_existent']
+
+    def testListWithEvictedInStructIndexing(self):
+        a = schema.ListWithEvicted(schema.Scalar(dtype=str))
+        s = schema.Struct(
+            ('field1', schema.Scalar(dtype=np.int32)),
+            ('field2', a)
+        )
+        self.assertEquals(s['field2:lengths'], a.lengths)
+        self.assertEquals(s['field2:values'], a.items)
+        self.assertEquals(s['field2:_evicted_values'], a._evicted_values)
         with self.assertRaises(KeyError):
             s['fields2:items:non_existent']
         with self.assertRaises(KeyError):

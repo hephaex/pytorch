@@ -1,9 +1,9 @@
 # @package regularizer_context
 # Module caffe2.python.normalizer_context
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+
+
+
+
 
 from caffe2.python import context
 from caffe2.python.modifier_context import (
@@ -28,7 +28,7 @@ class NormalizerContext(ModifierContext):
 class UseNormalizer(UseModifierBase):
     '''
     context class to allow setting the current context.
-    Example useage with layer:
+    Example usage with layer:
         normalizers = {'norm1': norm1, 'norm2': norm2}
         with UseNormalizer(normalizers):
             norm = NormalizerContext.current().get_normalizer('norm1')

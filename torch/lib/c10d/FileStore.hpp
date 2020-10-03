@@ -2,6 +2,7 @@
 
 #include <sys/types.h>
 
+#include <mutex>
 #include <unordered_map>
 
 #include <c10d/Store.hpp>
@@ -19,6 +20,10 @@ class FileStore : public Store {
   std::vector<uint8_t> get(const std::string& key) override;
 
   int64_t add(const std::string& key, int64_t value) override;
+
+  int64_t getNumKeys() override;
+
+  bool deleteKey(const std::string& key) override;
 
   bool check(const std::vector<std::string>& keys) override;
 
@@ -39,6 +44,8 @@ class FileStore : public Store {
   const std::string regularPrefix_;
 
   std::unordered_map<std::string, std::vector<uint8_t>> cache_;
+
+  std::mutex activeFileOpLock_;
 };
 
 } // namespace c10d

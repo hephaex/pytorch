@@ -5,6 +5,7 @@
 #include "caffe2/proto/caffe2_legacy.pb.h"
 #include "caffe2/utils/map_utils.h"
 #include "caffe2/utils/proto_utils.h"
+#include "caffe2/utils/string_utils.h"
 
 #include <numeric>
 #include <unordered_set>
@@ -102,6 +103,160 @@ NodeProto AddShapeNode(const std::string& input, const std::string& output) {
   return shape_node;
 }
 
+void collectExternalsFromIfOpSubnet(
+    const NetDef* net,
+    std::vector<std::string>* input,
+    std::vector<std::string>* output) {
+  std::set<std::string> in_input, in_output;
+  for (const auto& op : net->op()) {
+    for (const auto& blob : op.input()) {
+      in_input.emplace(blob);
+    }
+    for (const auto& blob : op.output()) {
+      in_output.emplace(blob);
+    }
+  }
+
+  for (const auto& blob : in_input) {
+    if (!in_output.count(blob)) {
+      input->push_back(blob);
+    }
+  }
+  for (const auto& blob : in_output) {
+    if (!in_input.count(blob)) {
+      output->push_back(blob);
+    }
+  }
+}
+
+void ssaRewriteForIfOp(
+    OperatorDef* op,
+    std::unordered_map<std::string, int>* blob_versions,
+    std::set<std::string>* is_initialized_tensor) {
+  // Get all the "external" inputs and outputs of the subnet
+  // Since then_net and else_net has same external input/output, we only collect
+  // external input/output from one of its subnet And perform the rewrite to
+  // both then_net and else_net
+  std::vector<std::string> if_external_input;
+  std::vector<std::string> if_external_output;
+
+  std::unordered_set<std::string> if_inputs, if_outputs;
+  for (const auto& input: op->input()) {
+    if_inputs.insert(input);
+  }
+  for (const auto& output: op->output()) {
+    if_outputs.insert(output);
+  }
+
+  ArgumentHelper helper(*op);
+  Argument *then_arg = nullptr, *else_arg = nullptr;
+  NetDef* target_net = nullptr;
+  bool has_then = false, has_else = false;
+
+  if (helper.HasSingleArgumentOfType<NetDef>("then_net")) {
+    then_arg = GetMutableArgument("then_net", false, op);
+    target_net = then_arg->mutable_n();
+    has_then = true;
+  }
+  if (helper.HasSingleArgumentOfType<NetDef>("else_net")) {
+    else_arg = GetMutableArgument("else_net", false, op);
+    if (!has_then) {
+      target_net = else_arg->mutable_n();
+    }
+    has_else = true;
+  }
+
+  if (has_then || has_else) {
+    collectExternalsFromIfOpSubnet(
+        target_net, &if_external_input, &if_external_output);
+
+    // Add inputs/outputs of the sub_net to the inputs/outputs of the op
+    for (const auto& input : if_external_input) {
+      if (if_inputs.count(input) == 0) {
+        op->add_input(input);
+      }
+    }
+    for (const auto& output : if_external_output) {
+      if (if_outputs.count(output) == 0) {
+        op->add_output(output);
+      }
+    }
+    std::map<string, string> oldname_to_newname;
+
+    // Build oldname_to_newname map
+    for (auto& input : if_external_input) {
+      const auto it = blob_versions->find(input);
+      if (it != blob_versions->end()) {
+        oldname_to_newname[input] = SsaName(input, it->second);
+      }
+    }
+    for (auto& output : if_external_output) {
+      auto it = blob_versions->find(output);
+      if (it != blob_versions->end()) {
+        if (is_initialized_tensor->count(output) == 0) {
+          it->second += 1;
+        } else {
+          is_initialized_tensor->erase(output);
+        }
+        oldname_to_newname[output] = SsaName(output, it->second);
+      } else {
+        blob_versions->emplace(output, 0);
+        oldname_to_newname[output] = SsaName(output, 0);
+      }
+    }
+
+    if (has_then) {
+      rewriteSubnet(then_arg, oldname_to_newname);
+    }
+    if (has_else) {
+      rewriteSubnet(else_arg, oldname_to_newname);
+    }
+  }
+}
+
+void revertRenamedExternalOutput(
+    OperatorDef* op,
+    const std::unordered_map<std::string, std::string>&
+        renamed_external_outputs) {
+  for (auto& input : *(op->mutable_input())) {
+    const auto it = renamed_external_outputs.find(input);
+    if (it != renamed_external_outputs.end()) {
+      input = it->second;
+    }
+  }
+  for (auto& output : *(op->mutable_output())) {
+    const auto it = renamed_external_outputs.find(output);
+    if (it != renamed_external_outputs.end()) {
+      output = it->second;
+    }
+  }
+}
+
+void revertRenamedExternalOutputForIfOp(
+    OperatorDef* if_op,
+    const std::unordered_map<std::string, std::string>&
+        renamed_external_outputs) {
+  ArgumentHelper helper(*if_op);
+  Argument *then_arg = nullptr, *else_arg = nullptr;
+
+  revertRenamedExternalOutput(if_op, renamed_external_outputs);
+
+  if (helper.HasSingleArgumentOfType<NetDef>("then_net")) {
+    then_arg = GetMutableArgument("then_net", false, if_op);
+    NetDef* net = then_arg->mutable_n();
+    for (auto& op : *(net->mutable_op())) {
+      revertRenamedExternalOutput(&op, renamed_external_outputs);
+    }
+  }
+  if (helper.HasSingleArgumentOfType<NetDef>("else_net")) {
+    else_arg = GetMutableArgument("else_net", false, if_op);
+    NetDef* net = else_arg->mutable_n();
+    for (auto& op : *(net->mutable_op())) {
+      revertRenamedExternalOutput(&op, renamed_external_outputs);
+    }
+  }
+}
+
 } // namespace
 
 ::ONNX_NAMESPACE::TensorProto::DataType Caffe2TypeToOnnxType(
@@ -127,109 +282,132 @@ NodeProto AddShapeNode(const std::string& input, const std::string& output) {
 #undef CAFFE2_TO_ONNX_TYPE
 }
 
+void rewriteSubnet(
+    Argument* arg,
+    std::map<std::string, std::string> oldname_to_newname) {
+  NetDef* net = arg->mutable_n();
+  // clear external inputs and outputs since they're no longer valid
+  net->mutable_external_input()->Clear();
+  net->mutable_external_output()->Clear();
+  for (auto& op : *(net->mutable_op())) {
+    for (auto& input : *(op.mutable_input())) {
+      if (oldname_to_newname.find(input) != oldname_to_newname.end()) {
+        input = oldname_to_newname[input];
+      }
+    }
+    for (auto& output : *(op.mutable_output())) {
+      if (oldname_to_newname.find(output) != oldname_to_newname.end()) {
+        output = oldname_to_newname[output];
+      }
+    }
+  }
+}
+
 std::unordered_map<std::string, std::string> SsaRewrite(
     caffe2::NetDef* init_net,
-    caffe2::NetDef* pred_net,
-    const std::unordered_set<string>& exceptions) {
+    caffe2::NetDef* pred_net) {
   std::unordered_map<std::string, std::string> input_mapping;
   std::unordered_map<std::string, int> blob_versions;
 
-#define REWRITE_EXTERNAL_IO(net, name)                 \
-  for (auto& name : *net->mutable_external_##name()) { \
-    if (exceptions.count(name)) {                      \
-      continue;                                        \
-    }                                                  \
-    auto version = blob_versions.at(name);             \
-    auto new_##name = SsaName(name, version);          \
-    name##_mapping.emplace(new_##name, name);          \
-    name = new_##name;                                 \
-  }
-
   if (init_net) {
-    for (auto& op : *init_net->mutable_op()) {
-      CAFFE_ENFORCE_EQ(op.type().find("GivenTensor"), 0);
-      CAFFE_ENFORCE_EQ(op.type().rfind("Fill"), op.type().size() - 4);
-      CAFFE_ENFORCE_EQ(op.output_size(), 1);
-      const auto& output = op.output(0);
-      op.set_output(0, SsaName(output, 0));
+    // No ssa rewrite is done for init net. The reason being that the output
+    // blobs of init net are what becomes the input blobs of pred_net. Since
+    // inputs of pred_net are not renamed we are not renaming the output of
+    // init_net. Furthermore, the assumption made is that init_net is simple net
+    // with each operator producing the one output and thus not renaming
+    // translates to not renaming the outputs of the init_net. Create identical
+    // mapping for now. This shall be removed eventually.
+    for (const auto& name : init_net->external_input()) {
+      input_mapping.emplace(name, name);
     }
-    for (const auto& input : init_net->external_input()) {
-      if (exceptions.count(input)) {
-        continue;
-      }
-      blob_versions.emplace(input, 0);
-    }
-    for (const auto& output : init_net->external_output()) {
-      if (exceptions.count(output)) {
-        continue;
-      }
-      blob_versions.emplace(output, 0);
-    }
-    REWRITE_EXTERNAL_IO(init_net, input);
     blob_versions.clear();
   }
 
+  std::set<std::string> is_initialized_tensor;
   if (pred_net) {
+    std::unordered_set<std::string> external_outputs;
     for (const auto& input : pred_net->external_input()) {
-      if (exceptions.count(input)) {
-        continue;
-      }
-      blob_versions.emplace(input, 0);
+      // Create identical mapping for now. This shall be removed eventually.
+      input_mapping.emplace(input, input);
     }
-    REWRITE_EXTERNAL_IO(pred_net, input);
+    for (const auto& output : pred_net->external_output()) {
+      external_outputs.emplace(output);
+    }
     for (auto& op : *pred_net->mutable_op()) {
+      // Special SSA Rewrite for subnet of If Operator
+      // This needs to happen first because the inputs/outputs of If/AsyncIf
+      // may get modified inside ssaRewriteForIfOp
+      if (op.type() == "If" || op.type() == "AsyncIf") {
+        ssaRewriteForIfOp(&op, &blob_versions, &is_initialized_tensor);
+      }
+
       for (auto& input : *op.mutable_input()) {
-        if (exceptions.count(input)) {
-          continue;
-        }
         const auto it = blob_versions.find(input);
         if (it != blob_versions.end()) {
           input = SsaName(input, it->second);
         } else {
-          blob_versions.emplace(input, 0);
-          input = SsaName(input, 0);
-        }
-      }
-      for (auto& output : *op.mutable_output()) {
-        if (exceptions.count(output)) {
+          // Input blob is not versioned yet.
+          // If it is not versioned yet, it is assumed to be primary input,
+          // Thus skip renaming it.
           continue;
         }
+      }
+
+      for (auto& output : *op.mutable_output()) {
         auto it = blob_versions.find(output);
         if (it != blob_versions.end()) {
-          it->second += 1;
+          if (op.type() != "If" && op.type() != "AsyncIf") {
+            if (is_initialized_tensor.count(output) == 0) {
+              it->second += 1;
+            } else {
+              is_initialized_tensor.erase(output);
+            }
+          }
           output = SsaName(output, it->second);
+
         } else {
           blob_versions.emplace(output, 0);
+          // These filling ops are designed for a by-default value for the
+          // tensors generated by ops like If. For example, if an If op's
+          // condition is not satisfied, and it does not have else_net, then it
+          // will not generate any output blob, which may cause some error in
+          // the future. Here we would like to ensure these tensors only been
+          // ssa re-write once but not twice. (One in the filling operator, one
+          // in If op)
+          if ((caffe2::StartsWith(op.type(), "GivenTensor") &&
+               caffe2::EndsWith(op.type(), "Fill")) ||
+              op.type() == "ConstantFill" ||
+              op.type() == "Int8GivenTensorFill" ||
+              op.type() == "Int8GivenIntTensorFill") {
+            is_initialized_tensor.insert(output);
+          }
           output = SsaName(output, 0);
         }
       }
     }
 
-    // Fix the external output name back to original
-    std::unordered_set<std::string> external_outputs;
-    for (const auto& output : pred_net->external_output()) {
-      external_outputs.emplace(output);
+    // For all the renamed blobs find if the blob is one of the external
+    // output. If so add a mapping from it's latest renamed version to its
+    // original name.
+    std::unordered_map<std::string, std::string> renamed_external_outputs;
+    for (const auto it : blob_versions) {
+      if (external_outputs.count(it.first)) {
+        renamed_external_outputs.emplace(
+            SsaName(it.first, it.second), it.first);
+      }
     }
+
+    // Use the mapping to find if the input or output of an op was a renamed
+    // external output. If so replace it with its original name.
     for (auto& op : *pred_net->mutable_op()) {
-      for (auto& output : *op.mutable_output()) {
-        if (exceptions.count(output)) {
-          continue;
-        }
-        auto pos = output.find_last_of('_');
-        CAFFE_ENFORCE_NE(pos, 0);
-        auto basename = output.substr(0, pos);
-        if (!external_outputs.count(basename)) {
-          continue;
-        }
-        auto it = blob_versions.find(basename);
-        if (it != blob_versions.end() &&
-            SsaName(basename, it->second) == output) {
-          output = basename;
-        }
+      // If/AsyncIf needs special handling
+      if (op.type() == "If" || op.type() == "AsyncIf") {
+        revertRenamedExternalOutputForIfOp(&op, renamed_external_outputs);
+      } else {
+        revertRenamedExternalOutput(&op, renamed_external_outputs);
       }
     }
   }
-#undef REWRITE_EXTERNAL_IO
 
   return input_mapping;
 }
@@ -249,7 +427,8 @@ OnnxExporter::get_renamed_operators() const {
       {"MaxPool3D", "MaxPool"},
       {"AveragePool1D", "AveragePool"},
       {"AveragePool2D", "AveragePool"},
-      {"AveragePool3D", "AveragePool"}};
+      {"AveragePool3D", "AveragePool"},
+      {"Copy", "Identity"}};
   return kRenamedOperators;
 }
 
@@ -348,24 +527,24 @@ void OnnxExporter::CopyCaffe2ArgToOnnxAttr(
   }
 }
 
-bool OnnxExporter::IsBlackListed(const caffe2::Argument& arg) {
+bool OnnxExporter::IsBlockListed(const caffe2::Argument& arg) {
   const static std::unordered_map<std::string, std::unordered_set<std::string>>
-      kBlackListString = {{"order", {"NCHW"}}};
+      kBlockListString = {{"order", {"NCHW"}}};
   const static std::unordered_map<std::string, std::unordered_set<int64_t>>
-      kBlackListInt = {{"cudnn_exhaustive_search", {0, 1}},
+      kBlockListInt = {{"cudnn_exhaustive_search", {0, 1}},
                        {"use_cudnn", {0, 1}},
                        {"exhaustive_search", {0, 1}},
                        {"is_test", {0, 1}},
                        {"broadcast", {0, 1}}};
 
   if (arg.has_i()) {
-    const auto it = kBlackListInt.find(arg.name());
-    if (it != kBlackListInt.end()) {
+    const auto it = kBlockListInt.find(arg.name());
+    if (it != kBlockListInt.end()) {
       return it->second.count(arg.i());
     }
   } else if (arg.has_s()) {
-    const auto it = kBlackListString.find(arg.name());
-    if (it != kBlackListString.end()) {
+    const auto it = kBlockListString.find(arg.name());
+    if (it != kBlockListString.end()) {
       return it->second.count(arg.s());
     }
   }
@@ -407,7 +586,7 @@ ConvertedResult OnnxExporter::CommonCaffe2OpToOnnxNodes(
     node.add_output(o);
   }
   for (const auto& a : def.arg()) {
-    if (!IsBlackListed(a)) {
+    if (!IsBlockListed(a)) {
       auto* attr = node.add_attribute();
       CopyCaffe2ArgToOnnxAttr(attr, def.type(), a);
     }
@@ -898,7 +1077,6 @@ ConvertedResult OnnxExporter::CreateReduceMeanNodes(
 
     ConvertedResult result;
     auto& nodes = result.first;
-    auto& const_tensors = result.second;
     std::unordered_map<std::string, const caffe2::Argument*> args;
     for (const auto& a : def.arg()) {
         args.emplace(a.name(), &a);
@@ -1176,7 +1354,7 @@ ConvertedResult OnnxExporter::CreateGemmNodes(
                 std::vector<AttributeProto>{
                     MakeAttribute("axis", static_cast<int64_t>(0)),
                 }));
- 
+
     nodes.emplace_back(MakeNode("Reshape",
                 { gemm_y_output, y_shape },
                 { y }));

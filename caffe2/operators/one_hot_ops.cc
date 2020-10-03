@@ -169,8 +169,9 @@ bool BatchBucketOneHotOp<CPUContext>::RunOnDevice() {
 
 class SegmentOneHotOp : public Operator<CPUContext> {
  public:
-  SegmentOneHotOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator(operator_def, ws) {}
+  template <class... Args>
+  explicit SegmentOneHotOp(Args&&... args)
+      : Operator(std::forward<Args>(args)...) {}
 
   bool RunOnDevice() override {
     auto& lengths = Input(0);
@@ -356,3 +357,8 @@ NO_GRADIENT(OneHot);
 NO_GRADIENT(SegmentOneHot);
 NO_GRADIENT(BucketBatchOneHot);
 } // namespace caffe2
+
+C10_EXPORT_CAFFE2_OP_TO_C10_CPU(
+    BatchBucketOneHot,
+    "_caffe2::BatchBucketOneHot(Tensor data, Tensor lengths, Tensor boundaries) -> Tensor output",
+    caffe2::BatchBucketOneHotOp<caffe2::CPUContext>);

@@ -141,7 +141,7 @@ template
    typename FinalizeOp,
    int ADims, int BDims>
 #if __CUDA_ARCH__ >= 350 || defined __HIP_PLATFORM_HCC__
-C10_LAUNCH_BOUNDS(512, 4)
+C10_LAUNCH_BOUNDS_2(512, 4)
 #endif
 __global__ void kernelReduceNoncontigDim_shared
   (TensorInfo<T, IndexType> out,
@@ -256,7 +256,7 @@ template <typename T,
           typename FinalizeOp,
           int ADims, int BDims>
 #if __CUDA_ARCH__ >= 350 || defined __HIP_PLATFORM_HCC__
-C10_LAUNCH_BOUNDS(512, 4)
+C10_LAUNCH_BOUNDS_2(512, 4)
 #endif
 __global__ void
 kernelReduceNoncontigDim(TensorInfo<T, IndexType> out,
@@ -506,7 +506,7 @@ bool THC_reduceDim(THCState* state,
     kernelReduceContigDim<ScalarType,                                   \
                           TYPE, AccT, ModifyOp, ReduceOp, FinalizeOp,   \
                           OUT, IN>                                      \
-      <<<grid, block, smemSize, THCState_getCurrentStream(state)>>>     \
+      <<<grid, block, smemSize, c10::cuda::getCurrentCUDAStream()>>>    \
         (outInfo, inInfo, reductionSize,                                \
         (TYPE) outElements, init, modifyOp, reduceOp, finalizeOp);      \
   } else {                                                              \
@@ -515,7 +515,7 @@ bool THC_reduceDim(THCState* state,
                           ScalarType,                                   \
                           TYPE, AccT, ModifyOp, ReduceOp, FinalizeOp,   \
                           OUT, IN>                                      \
-        <<<grid, block, 0, THCState_getCurrentStream(state)>>>          \
+        <<<grid, block, 0, c10::cuda::getCurrentCUDAStream()>>>         \
         (outInfo, inInfo, reductionStride, reductionSize,               \
         (TYPE) outElements, init, modifyOp, reduceOp, finalizeOp);      \
     }                                                                   \
@@ -532,12 +532,12 @@ bool THC_reduceDim(THCState* state,
             (semaphores,                                                     \
              0,                                                              \
              sizeof(int)*grid.x,                                             \
-             THCState_getCurrentStream(state)));                             \
+             c10::cuda::getCurrentCUDAStream()));                             \
         }                                                                    \
                                                                              \
         kernelReduceNoncontigDim_shared                                      \
           <ScalarType, TYPE, AccT, ModifyOp, ReduceOp, FinalizeOp,  OUT, IN> \
-          <<<grid, block, 0, THCState_getCurrentStream(state)>>>             \
+          <<<grid, block, 0, c10::cuda::getCurrentCUDAStream()>>>             \
           (outInfo,                                                          \
            inInfo,                                                           \
            reductionStride,                                                  \

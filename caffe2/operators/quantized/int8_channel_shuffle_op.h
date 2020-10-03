@@ -15,9 +15,8 @@ namespace int8 {
 
 class Int8ChannelShuffleOp final : public ConvPoolOpBase<CPUContext> {
  public:
-  Int8ChannelShuffleOp(const OperatorDef& operator_def, Workspace* ws)
-      : ConvPoolOpBase<CPUContext>(operator_def, ws),
-        ws_(ws) {
+  explicit Int8ChannelShuffleOp(const OperatorDef& operator_def, Workspace* ws)
+      : ConvPoolOpBase<CPUContext>(operator_def, ws), ws_(ws) {
     OPERATOR_NEEDS_FEATURE(
         this->order_ == StorageOrder::NHWC,
         "Int8ChannelShuffleOp only supports NHWC order");
@@ -36,8 +35,10 @@ class Int8ChannelShuffleOp final : public ConvPoolOpBase<CPUContext> {
     Y->t.ResizeLike(X.t);
     Y->scale = X.scale;
     Y->zero_point = X.zero_point;
-    const int32_t Y_offset = this->template GetSingleArgument<int>("Y_zero_point", 0);
-    const float Y_scale = this->template GetSingleArgument<float>("Y_scale", 1.0f);
+    const int32_t Y_offset =
+        this->template GetSingleArgument<int>("Y_zero_point", 0);
+    const float Y_scale =
+        this->template GetSingleArgument<float>("Y_scale", 1.0f);
     CHECK_EQ(Y_offset, X.zero_point);
     CHECK_EQ(Y_scale, X.scale);
     CHECK_GE(X.zero_point, std::numeric_limits<uint8_t>::min());
@@ -52,10 +53,10 @@ class Int8ChannelShuffleOp final : public ConvPoolOpBase<CPUContext> {
 
     if (this->qnnpackOperator_ == nullptr) {
       const qnnp_status createStatus = qnnp_create_channel_shuffle_nc_x8(
-        G /* groups */,
-        C / G /* group channels */,
-        0 /* flags */,
-        &this->qnnpackOperator_);
+          G /* groups */,
+          C / G /* group channels */,
+          0 /* flags */,
+          &this->qnnpackOperator_);
       CAFFE_ENFORCE(
           createStatus == qnnp_status_success,
           "failed to create QNNPACK channel shuffle operator");
@@ -73,7 +74,7 @@ class Int8ChannelShuffleOp final : public ConvPoolOpBase<CPUContext> {
         setupStatus == qnnp_status_success,
         "failed to setup QNNPACK channel shuffle operator");
 
-#ifdef FBCODE_CAFFE2
+#if defined(FBCODE_CAFFE2) || !defined(USE_INTERNAL_PTHREADPOOL_IMPL)
     const qnnp_status runStatus =
         qnnp_run_operator(this->qnnpackOperator_, nullptr /* thread pool */);
 #else

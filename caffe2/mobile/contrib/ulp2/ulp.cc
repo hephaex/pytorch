@@ -257,18 +257,18 @@ void qim2col(const ConvArgs& args, const TensorCPU& XQ, const TensorCPU& WQ, Ten
 std::unique_ptr<QConvState> create2b1bConvState(Workspace* ws,
                                                 const TensorCPU& W,
                                                 const TensorCPU* b) {
-  auto state = caffe2::make_unique<QConvState>();
+  auto state = std::make_unique<QConvState>();
   state->XQs.resize(k2b1bXBits);
   state->YQs.resize(k2b1bXBits);
   for (auto i = 0; i < k2b1bXBits; ++i) {
-    state->XQs[i] = caffe2::make_unique<Tensor>(CPU);
-    state->YQs[i] = caffe2::make_unique<Tensor>(CPU);
+    state->XQs[i] = std::make_unique<Tensor>(CPU);
+    state->YQs[i] = std::make_unique<Tensor>(CPU);
   }
-  state->WQ = caffe2::make_unique<Tensor>(CPU);
-  state->WQN = caffe2::make_unique<Tensor>(CPU);
-  state->WQL1Norm = caffe2::make_unique<Tensor>(CPU);
-  state->scratch = caffe2::make_unique<Tensor>(CPU);
-  state->scratchColBuffer = caffe2::make_unique<Tensor>(CPU);
+  state->WQ = std::make_unique<Tensor>(CPU);
+  state->WQN = std::make_unique<Tensor>(CPU);
+  state->WQL1Norm = std::make_unique<Tensor>(CPU);
+  state->scratch = std::make_unique<Tensor>(CPU);
+  state->scratchColBuffer = std::make_unique<Tensor>(CPU);
 
   signQuantize(W, state->WQ.get());
   filterNormalization11(*(state->WQ), state->WQN.get());
@@ -280,7 +280,7 @@ std::unique_ptr<QConvState> create2b1bConvState(Workspace* ws,
   //   r->WQL1Norm.mutable_data<float>()[i] *= center_distance;
   // }
   state->parallelFor = [ws](size_t range, std::function<void(size_t)> f) {
-#if C10_MOBILE
+#ifdef C10_MOBILE
     ws->GetThreadPool()->run([&](int, size_t v) { f(v); }, range);
 #else
     for (size_t v = 0; v < range; ++v) {
@@ -289,7 +289,7 @@ std::unique_ptr<QConvState> create2b1bConvState(Workspace* ws,
 #endif
   };
   if (b) {
-    state->bias = caffe2::make_unique<Tensor>(*b, CPU);
+    state->bias = std::make_unique<Tensor>(*b, CPU);
   }
   return state;
 }

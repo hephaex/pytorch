@@ -1,9 +1,9 @@
 # @package functional
 # Module caffe2.python.layers.functional
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+
+
+
+
 
 from caffe2.python import core, schema, scope, workspace
 from caffe2.python.layers.layers import (
@@ -90,7 +90,7 @@ class Functional(ModelLayer):
                 elif shapes[blob][0] == 0:
                     shape = tuple(shapes[blob][1:])
                 else:
-                    logger.warning("unexpeced shape: {}".format(shapes[blob]))
+                    logger.warning("unexpected shape: {}".format(shapes[blob]))
                     # If batch dimension is not first - give up on shape
                     # inference for that blob
                     had_issues = True

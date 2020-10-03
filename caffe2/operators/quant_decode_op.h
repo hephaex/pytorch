@@ -1,10 +1,10 @@
 #ifndef QUANT_DECODE_OP_H_
 #define QUANT_DECODE_OP_H_
 
+#include <c10/util/typeid.h>
 #include "caffe2/core/context.h"
 #include "caffe2/core/operator.h"
 #include "caffe2/core/tensor.h"
-#include <c10/util/typeid.h>
 
 namespace caffe2 {
 
@@ -102,8 +102,9 @@ template <QuantDecodeRunTy QuantDecodeRun>
 class QuantDecodeOp final : public Operator<CPUContext> {
  public:
   USE_OPERATOR_FUNCTIONS(CPUContext);
-  QuantDecodeOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<CPUContext>(operator_def, ws) {}
+  template <class... Args>
+  explicit QuantDecodeOp(Args&&... args)
+      : Operator<CPUContext>(std::forward<Args>(args)...) {}
 
   ~QuantDecodeOp() {}
 
@@ -138,8 +139,9 @@ class QuantDecodeOp final : public Operator<CPUContext> {
 class QuantDecodeGradientOp final : public Operator<CPUContext> {
  public:
   USE_OPERATOR_FUNCTIONS(CPUContext);
-  QuantDecodeGradientOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<CPUContext>(operator_def, ws) {}
+  template <class... Args>
+  explicit QuantDecodeGradientOp(Args&&... args)
+      : Operator<CPUContext>(std::forward<Args>(args)...) {}
   ~QuantDecodeGradientOp() {}
 
   bool RunOnDevice() override {

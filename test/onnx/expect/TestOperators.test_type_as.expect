@@ -1,6 +1,6 @@
-ir_version: 4
+ir_version: 6
 producer_name: "pytorch"
-producer_version: "1.1"
+producer_version: "CURRENT_VERSION"
 graph {
   name: "torch-jit-export"
   input {
@@ -31,5 +31,5 @@ graph {
   }
 }
 opset_import {
-  version: 10
+  version: 9
 }

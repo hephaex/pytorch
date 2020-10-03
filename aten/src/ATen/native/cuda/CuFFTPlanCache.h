@@ -37,7 +37,7 @@ static inline void setCuFFTParams(CuFFTParams* params,
     bool complex_output, IntArrayRef checked_signal_sizes, bool onesided) {
 
   memset(params, 0, sizeof(CuFFTParams));
-  params->scalar_type_ = input.type().scalarType();
+  params->scalar_type_ = input.scalar_type();
   for (int i = 0; i != input.dim(); ++i) {
     params->input_sizes_[i] = input.size(i);
     if (input.size(i) != 1) {
@@ -55,9 +55,12 @@ static inline void setCuFFTParams(CuFFTParams* params,
 
 struct CuFFTHandleDeleter {
   void operator()(cufftHandle* x) {
+// Not using fftDestroy() for rocFFT to work around double freeing of handles
+#ifndef __HIP_PLATFORM_HCC__
     if (x != nullptr) {
       CUFFT_CHECK(cufftDestroy(*x));
     }
+#endif
   }
 };
 
@@ -106,16 +109,16 @@ public:
     // For half, base strides on the real part of real-to-complex and
     // complex-to-real transforms are not supported. Since our output is always
     // contiguous, only need to check real-to-complex case.
-    if (input.type().scalarType() == ScalarType::Half) {
+    if (input.scalar_type() == ScalarType::Half) {
       // cuFFT on half requires compute capability of at least SM_53
       auto dev_prop = at::cuda::getCurrentDeviceProperties();
-      AT_CHECK(dev_prop->major >= 5 && !(dev_prop->major == 5 && dev_prop->minor < 3),
+      TORCH_CHECK(dev_prop->major >= 5 && !(dev_prop->major == 5 && dev_prop->minor < 3),
                "cuFFT doesn't support signals of half type with compute "
                "capability less than SM_53, but the device containing input half "
                "tensor only has SM_", dev_prop->major, dev_prop->minor);
       for (int64_t i = 0; i < signal_ndim; i++) {
         auto signal_size = checked_signal_sizes[i];
-        AT_CHECK(is_pow_of_two(signal_size),
+        TORCH_CHECK(is_pow_of_two(signal_size),
                  "cuFFT doesn't support signals of half type with size at any ",
                  "dimension that is not a power of two, but got a signal size of ",
                  checked_signal_sizes);
@@ -137,6 +140,9 @@ public:
       // See NOTE [ cuFFT Embedded Strides ] in native/cuda/SpectralOps.cu.
       clone_input |= (batch > 0 && input.stride(0) % 2 != 0) ||
                       input.stride(signal_ndim) % 2 != 0;
+
+      // Complex to real FFTs may overwrite the input buffer (gh-34551)
+      clone_input |= !complex_output;
     }
 
     // Checks if input strides can be viewed as embedded.
@@ -196,7 +202,7 @@ public:
 #ifdef __HIP_PLATFORM_HCC__
 
     hipfftType exec_type;
-    if (input.type().scalarType() == ScalarType::Float) {
+    if (input.scalar_type() == ScalarType::Float) {
       if (complex_input && complex_output) {
         exec_type = HIPFFT_C2C;
       } else if (complex_input && !complex_output) {
@@ -206,7 +212,7 @@ public:
       } else {
         AT_ERROR("hipFFT doesn't support r2r (float)");
       }
-    } else if (input.type().scalarType() == ScalarType::Double) {
+    } else if (input.scalar_type() == ScalarType::Double) {
       if (complex_input && complex_output) {
         exec_type = HIPFFT_Z2Z;
       } else if (complex_input && !complex_output) {
@@ -219,28 +225,28 @@ public:
     } else {
       std::ostringstream ss;
       ss << "hipFFT doesn't support tensor of type: "
-         << toString(input.type().scalarType());
+         << toString(input.scalar_type());
       AT_ERROR(ss.str());
     }
 
 #else
     cudaDataType itype, otype, exec_type;
-    if (input.type().scalarType() == ScalarType::Float) {
+    if (input.scalar_type() == ScalarType::Float) {
       itype = complex_input ? CUDA_C_32F : CUDA_R_32F;
       otype = complex_output ? CUDA_C_32F : CUDA_R_32F;
       exec_type = CUDA_C_32F;
-    } else if (input.type().scalarType() == ScalarType::Double) {
+    } else if (input.scalar_type() == ScalarType::Double) {
       itype = complex_input ? CUDA_C_64F : CUDA_R_64F;
       otype = complex_output ? CUDA_C_64F : CUDA_R_64F;
       exec_type = CUDA_C_64F;
-    } else if (input.type().scalarType() == ScalarType::Half) {
+    } else if (input.scalar_type() == ScalarType::Half) {
       itype = complex_input ? CUDA_C_16F : CUDA_R_16F;
       otype = complex_output ? CUDA_C_16F : CUDA_R_16F;
       exec_type = CUDA_C_16F;
     } else {
       std::ostringstream ss;
       ss << "cuFFT doesn't support tensor of type: "
-         << toString(input.type().scalarType());
+         << toString(input.scalar_type());
       AT_ERROR(ss.str());
     }
 #endif
@@ -266,7 +272,7 @@ public:
       CUFFT_CHECK(hipfftMakePlanMany(plan(), signal_ndim, signal_sizes.data(),
         /* inembed */ nullptr, /* base_istride */ 1, /* idist */ 1,
         /* onembed */ nullptr, /* base_ostride */ 1, /* odist */ 1,
-	exec_type, batch, &ws_size_t));
+        exec_type, batch, &ws_size_t));
 #else
       CUFFT_CHECK(cufftXtMakePlanMany(plan(), signal_ndim, signal_sizes.data(),
         /* inembed */ nullptr, /* base_istride */ 1, /* idist */ 1, itype,
@@ -373,6 +379,18 @@ public:
     _set_max_size(max_size);
   }
 
+  CuFFTParamsLRUCache(CuFFTParamsLRUCache&& other) noexcept :
+    _usage_list(std::move(other._usage_list)),
+    _cache_map(std::move(other._cache_map)),
+    _max_size(other._max_size) {}
+
+  CuFFTParamsLRUCache& operator=(CuFFTParamsLRUCache&& other) noexcept {
+    _usage_list = std::move(other._usage_list);
+    _cache_map = std::move(other._cache_map);
+    _max_size = other._max_size;
+    return *this;
+  }
+
   // If key is in this cache, return the cached config. Otherwise, emplace the
   // config in this cache using value_args and return it.
   // Return const reference because CuFFTConfig shouldn't be tampered with once
@@ -431,15 +449,17 @@ public:
 
   size_t max_size() const noexcept { return _max_size; }
 
+  std::mutex mutex;
+
 private:
   // Only sets size and does value check. Does not resize the data structures.
   void _set_max_size(int64_t new_size) {
     // We check that 0 <= new_size <= CUFFT_MAX_PLAN_NUM here. Since
     // CUFFT_MAX_PLAN_NUM is of type size_t, we need to do non-negativity check
     // first.
-    AT_CHECK(new_size >= 0,
+    TORCH_CHECK(new_size >= 0,
              "cuFFT plan cache size must be non-negative, but got ", new_size);
-    AT_CHECK(new_size <= CUFFT_MAX_PLAN_NUM,
+    TORCH_CHECK(new_size <= CUFFT_MAX_PLAN_NUM,
              "cuFFT plan cache size can not be larger than ", CUFFT_MAX_PLAN_NUM, ", but got ", new_size);
     _max_size = static_cast<size_t>(new_size);
   }
@@ -455,9 +475,9 @@ private:
 // native function counterparts (at native/SpectralOps.cpp), i.e.,
 // _cufft_get_plan_cache_max_size, _cufft_set_plan_cache_max_size
 // _cufft_get_plan_cache_size, and _cufft_clear_plan_cache.
-int64_t cufft_get_plan_cache_max_size_impl();
-void cufft_set_plan_cache_max_size_impl(int64_t max_size);
-int64_t cufft_get_plan_cache_size_impl();
-void cufft_clear_plan_cache_impl();
+int64_t cufft_get_plan_cache_max_size_impl(int64_t device_index);
+void cufft_set_plan_cache_max_size_impl(int64_t device_index, int64_t max_size);
+int64_t cufft_get_plan_cache_size_impl(int64_t device_index);
+void cufft_clear_plan_cache_impl(int64_t device_index);
 
 }}} // namespace at::native::detail

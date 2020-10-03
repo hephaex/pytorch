@@ -26,6 +26,8 @@ class TCPStoreDaemon {
   void addHandler(int socket);
   void getHandler(int socket) const;
   void checkHandler(int socket) const;
+  void getNumKeysHandler(int socket) const;
+  void deleteHandler(int socket);
   void waitHandler(int socket);
 
   bool checkKeys(const std::vector<std::string>& keys) const;
@@ -49,7 +51,9 @@ class TCPStore : public Store {
       const std::string& masterAddr,
       PortType masterPort,
       int numWorkers,
-      bool isServer = false);
+      bool isServer = false,
+      const std::chrono::milliseconds& timeout = kDefaultTimeout,
+      bool waitWorkers = true);
 
   virtual ~TCPStore();
 
@@ -59,7 +63,11 @@ class TCPStore : public Store {
 
   int64_t add(const std::string& key, int64_t value) override;
 
+  bool deleteKey(const std::string& key) override;
+
   bool check(const std::vector<std::string>& keys) override;
+
+  int64_t getNumKeys() override;
 
   void wait(const std::vector<std::string>& keys) override;
 
@@ -67,13 +75,18 @@ class TCPStore : public Store {
       const std::vector<std::string>& keys,
       const std::chrono::milliseconds& timeout) override;
 
+  // Waits for all workers to join.
+  void waitForWorkers();
+
+  // Returns the port used by the TCPStore.
+  PortType getPort();
+
  protected:
   int64_t addHelper_(const std::string& key, int64_t value);
   std::vector<uint8_t> getHelper_(const std::string& key);
   void waitHelper_(
       const std::vector<std::string>& keys,
       const std::chrono::milliseconds& timeout);
-  void waitForWorkers_();
 
   bool isServer_;
   int storeSocket_ = -1;

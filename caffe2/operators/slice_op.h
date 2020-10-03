@@ -7,8 +7,6 @@
 
 namespace caffe2 {
 
-namespace {
-
 template <class SIndex, class Context>
 bool SliceImpl(
     Tensor* output,
@@ -71,6 +69,9 @@ bool SliceImpl(
     if (!backward) {
       output->Resize(dst_sizes);
       output->raw_mutable_data(data.dtype());
+    } else {
+      gdata->ResizeLike(data);
+      gdata->raw_mutable_data(go->dtype());
     }
     return true;
   }
@@ -129,7 +130,7 @@ bool SliceImpl(
 
     char* src_offset_bytes = src_bytes + itemsize * src_offset;
     char* dst_offset_bytes = dst_bytes;
-    for (int i = 0; i < num_blocks; ++i) {
+    for (size_t i = 0; i < num_blocks; ++i) {
       char* local_src_offset_bytes =
           src_offset_bytes + i * src_block_size_bytes;
       char* local_dst_offset_bytes =
@@ -175,7 +176,7 @@ bool SliceImpl(
       return true;
     }
 
-    for (int i = 0; i < num_blocks; ++i) {
+    for (size_t i = 0; i < num_blocks; ++i) {
       char* local_src_offset_bytes =
           src_offset_bytes + i * src_block_size_bytes;
       char* local_dst_offset_bytes =
@@ -196,14 +197,13 @@ bool SliceImpl(
   return true;
 }
 
-} // namespace
-
 template <class Context>
 class SliceOp : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
-  SliceOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<Context>(operator_def, ws),
+  template <class... Args>
+  explicit SliceOp(Args&&... args)
+      : Operator<Context>(std::forward<Args>(args)...),
         starts_(this->template GetRepeatedArgument<int64_t>("starts")),
         ends_(this->template GetRepeatedArgument<int64_t>("ends")),
         statically_inited_(false) {}
@@ -263,8 +263,9 @@ template <class Context>
 class SliceGradientOp : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
-  SliceGradientOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<Context>(operator_def, ws),
+  template <class... Args>
+  explicit SliceGradientOp(Args&&... args)
+      : Operator<Context>(std::forward<Args>(args)...),
         starts_(this->template GetRepeatedArgument<int64_t>("starts")),
         ends_(this->template GetRepeatedArgument<int64_t>("ends")),
         statically_inited_(false) {}

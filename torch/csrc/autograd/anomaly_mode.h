@@ -1,10 +1,15 @@
 #pragma once
 
+#include <string>
+#include <memory>
 #include <torch/csrc/WindowsTorchApiMacro.h>
 
 namespace torch { namespace autograd {
 
-struct AnomalyMode {
+// forward declaration of Node from function.h
+struct Node;
+
+struct TORCH_API AnomalyMode {
   static bool is_enabled() {
     return _enabled;
   }
@@ -13,14 +18,15 @@ struct AnomalyMode {
   }
 
 private:
- TORCH_API static bool _enabled;
+  static bool _enabled;
 };
 
 
-struct AnomalyMetadata {
-  virtual ~AnomalyMetadata() = default;
+struct TORCH_API AnomalyMetadata {
+  virtual ~AnomalyMetadata();
   virtual void store_stack() = 0;
-  virtual void print_stack() = 0;
+  virtual void print_stack(const std::string& current_node_name) = 0;
+  virtual void assign_parent(const std::shared_ptr<Node>& parent_node) = 0;
 };
 
 }}

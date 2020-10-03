@@ -1,13 +1,18 @@
 #!/usr/bin/env python
 
-from __future__ import absolute_import, division, print_function
-import os
-import sys
-import subprocess
-import argparse
-from functools import reduce
 
-from pyHIPIFY import hipify_python
+import os
+import argparse
+import sys
+sys.path.append(os.path.realpath(os.path.join(
+    __file__,
+    os.path.pardir,
+    os.path.pardir,
+    os.path.pardir,
+    'torch',
+    'utils')))
+
+from hipify import hipify_python
 
 parser = argparse.ArgumentParser(description='Top-level script for HIPifying, filling in most common parameters')
 parser.add_argument(
@@ -26,7 +31,15 @@ parser.add_argument(
     '--output-directory',
     type=str,
     default='',
-    help="The Directory to Store the Hipified Project",
+    help="The directory to store the hipified project",
+    required=False)
+
+parser.add_argument(
+    '--extra-include-dir',
+    type=str,
+    default=[],
+    nargs='+',
+    help="The list of extra directories in caffe2 to hipify",
     required=False)
 
 args = parser.parse_args()
@@ -49,19 +62,24 @@ includes = [
     "caffe2/video/*",
     "caffe2/distributed/*",
     "caffe2/queue/*",
+    "caffe2/contrib/aten/*",
     "binaries/*",
     "caffe2/**/*_test*",
     "caffe2/core/*",
     "caffe2/db/*",
     "caffe2/utils/*",
+    "caffe2/contrib/gloo/*",
+    "caffe2/contrib/nccl/*",
     "c10/cuda/*",
     "c10/cuda/test/CMakeLists.txt",
+    "modules/*",
     # PyTorch paths
     # Keep this synchronized with is_pytorch_file in hipify_python.py
     "aten/src/ATen/cuda/*",
     "aten/src/ATen/native/cuda/*",
     "aten/src/ATen/native/cudnn/*",
     "aten/src/ATen/native/sparse/cuda/*",
+    "aten/src/ATen/native/quantized/cuda/*",
     "aten/src/THC/*",
     "aten/src/THCUNN/*",
     "aten/src/ATen/test/*",
@@ -70,7 +88,14 @@ includes = [
     "aten/src/THC/CMakeLists.txt",
     "aten/src/THCUNN/CMakeLists.txt",
     "torch/*",
+    "tools/autograd/templates/python_variable_methods.cpp",
 ]
+
+for new_dir in args.extra_include_dir:
+    abs_new_dir = os.path.join(proj_dir, new_dir)
+    if os.path.exists(abs_new_dir):
+        new_dir = os.path.join(new_dir, '**/*')
+        includes.append(new_dir)
 
 ignores = [
     "caffe2/operators/depthwise_3x3_conv_op_cudnn.cu",
@@ -78,45 +103,33 @@ ignores = [
     '*/hip/*',
     # These files are compatible with both cuda and hip
     "aten/src/ATen/core/*",
-    "torch/csrc/autograd/engine.cpp",
     # generated files we shouldn't frob
     "torch/lib/tmp_install/*",
     "torch/include/*",
 ]
 
-json_settings = os.path.join(amd_build_dir, "disabled_features.json")
+# Check if the compiler is hip-clang.
+def is_hip_clang():
+    try:
+        hip_path = os.getenv('HIP_PATH', '/opt/rocm/hip')
+        return 'HIP_COMPILER=clang' in open(hip_path + '/lib/.hipInfo').read()
+    except IOError:
+        return False
 
-if not args.out_of_place_only:
-    # Apply patch files in place (PyTorch only)
-    patch_folder = os.path.join(amd_build_dir, "patches")
-    for filename in os.listdir(os.path.join(amd_build_dir, "patches")):
-        subprocess.Popen(["git", "apply", os.path.join(patch_folder, filename)], cwd=proj_dir)
-
-    # Make various replacements inside AMD_BUILD/torch directory
-    ignore_files = [
-        # These files use nvrtc, hip doesn't have equivalent
-        "csrc/autograd/profiler.h",
-        "csrc/autograd/profiler.cpp",
-        # These files are compatible with both cuda and hip
-        "csrc/autograd/engine.cpp"
-    ]
-    for root, _directories, files in os.walk(os.path.join(proj_dir, "torch")):
-        for filename in files:
-            if filename.endswith(".cpp") or filename.endswith(".h"):
-                source = os.path.join(root, filename)
-                # Disabled files
-                if reduce(lambda result, exclude: source.endswith(exclude) or result, ignore_files, False):
-                    continue
-                # Update contents.
-                with open(source, "r+") as f:
-                    contents = f.read()
-                    contents = contents.replace("USE_CUDA", "USE_ROCM")
-                    contents = contents.replace("CUDA_VERSION", "0")
-                    f.seek(0)
-                    f.write(contents)
-                    f.truncate()
-                    f.flush()
-                    os.fsync(f)
+# TODO Remove once gloo submodule is recent enough to contain upstream fix.
+if is_hip_clang():
+    gloo_cmake_file = "third_party/gloo/cmake/Hip.cmake"
+    do_write = False
+    with open(gloo_cmake_file, "r") as sources:
+        lines = sources.readlines()
+    newlines = [line.replace(' hip_hcc ', ' amdhip64 ') for line in lines]
+    if lines == newlines:
+        print("%s skipped" % gloo_cmake_file)
+    else:
+        with open(gloo_cmake_file, "w") as sources:
+            for line in newlines:
+                sources.write(line)
+        print("%s updated" % gloo_cmake_file)
 
 hipify_python.hipify(
     project_directory=proj_dir,
@@ -124,4 +137,4 @@ hipify_python.hipify(
     includes=includes,
     ignores=ignores,
     out_of_place_only=args.out_of_place_only,
-    json_settings=json_settings)
+    hip_clang_launch=is_hip_clang())

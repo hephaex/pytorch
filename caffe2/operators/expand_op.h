@@ -15,13 +15,14 @@ class ExpandOp final : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
 
-  ExpandOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<Context>(operator_def, ws) {}
+  template <class... Args>
+  explicit ExpandOp(Args&&... args)
+      : Operator<Context>(std::forward<Args>(args)...) {}
 
   bool RunOnDevice() override {
     return DispatchHelper<InputTypes>::call(this, Input(0));
   }
- template <typename T>
+  template <typename T>
   bool DoRunWithType() {
     const auto& X = Input(0);
     const auto& Y_shape_tensor = Input(1);
@@ -63,7 +64,6 @@ class ExpandOp final : public Operator<Context> {
         &context_);
     return true;
   }
-
 };
 
 template <typename InputTypes, class Context>
@@ -71,8 +71,9 @@ class ExpandGradientOp final : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
 
-  ExpandGradientOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<Context>(operator_def, ws) {}
+  template <class... Args>
+  explicit ExpandGradientOp(Args&&... args)
+      : Operator<Context>(std::forward<Args>(args)...) {}
 
   bool RunOnDevice() override {
     return DispatchHelper<InputTypes>::call(this, Input(0));

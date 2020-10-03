@@ -12,7 +12,7 @@ namespace caffe2 {
 
 class CudnnConvOpBase : public ConvPoolOpBase<CUDAContext> {
  public:
-  CudnnConvOpBase(const OperatorDef& operator_def, Workspace* ws)
+  explicit CudnnConvOpBase(const OperatorDef& operator_def, Workspace* ws)
       : ConvPoolOpBase<CUDAContext>(operator_def, ws),
         cudnn_wrapper_(&context_),
         cudnn_ws_nbytes_limit_(OperatorBase::GetSingleArgument<size_t>(
@@ -97,7 +97,7 @@ class CudnnConvOpBase : public ConvPoolOpBase<CUDAContext> {
   }
 
  protected:
-  // A helper function to set up the tensor Nd desriptor, depending on the order
+  // A helper function to set up the tensor Nd descriptor, depending on the order
   // the group and the type given.
   template <typename T>
   void SetTensorNdDescriptorWithGroup(
@@ -432,7 +432,7 @@ class CudnnConvOpBase : public ConvPoolOpBase<CUDAContext> {
 
 class CudnnConvOp final : public CudnnConvOpBase {
  public:
-  CudnnConvOp(const OperatorDef& operator_def, Workspace* ws)
+  explicit CudnnConvOp(const OperatorDef& operator_def, Workspace* ws)
       : CudnnConvOpBase(operator_def, ws) {}
 
   ~CudnnConvOp() override {}
@@ -453,7 +453,7 @@ class CudnnConvOp final : public CudnnConvOpBase {
 
 class CudnnConvGradientOp final : public CudnnConvOpBase {
  public:
-  CudnnConvGradientOp(const OperatorDef& operator_def, Workspace* ws)
+  explicit CudnnConvGradientOp(const OperatorDef& operator_def, Workspace* ws)
       : CudnnConvOpBase(operator_def, ws),
         no_bias_(OperatorBase::GetSingleArgument<int>("no_bias", 0)) {
     CAFFE_ENFORCE(
@@ -514,13 +514,13 @@ template <typename T_X, typename T_W, typename T_B, typename T_Y>
 bool CudnnConvOp::DoRunWithType() {
   auto& X = Input(INPUT);
   auto& filter = Input(FILTER);
-  auto* Y = Output(0);
 
   // Figure out the output shape
   CAFFE_ENFORCE(X.dim() >= 3 && X.dim() <= 5);
   CAFFE_ENFORCE(filter.dim() >= 3 && filter.dim() <= 5);
   const int M = filter.dim32(0);
-  ConvPoolOpBase<CUDAContext>::SetOutputSize(X, Y, M);
+  auto output_sizes = ConvPoolOpBase<CUDAContext>::GetOutputSize(X, M);
+  auto* Y = Output(0, output_sizes, at::dtype<T_Y>());
 
   int N = 0, C = 0, H = 0, W = 0, D = 0, H_out = 0, W_out = 0, D_out = 0;
   int group_offset_X = 0, group_offset_Y = 0;
@@ -751,15 +751,28 @@ bool CudnnConvOp::DoRunWithType() {
       }
     } else {
       // Get the convolution algorithm based on the workspace limit.
-      CUDNN_ENFORCE(cudnnGetConvolutionForwardAlgorithm(
+      constexpr int nalgo = CUDNN_CONVOLUTION_FWD_ALGO_COUNT;
+      int valid_algos;
+      cudnnConvolutionFwdAlgoPerf_t algos[nalgo];
+      CUDNN_ENFORCE(cudnnGetConvolutionForwardAlgorithm_v7(
           cudnn_wrapper_.inline_cudnn_handle(),
           bottom_desc_,
           filter_desc_,
           conv_desc_,
           top_desc_,
-          CUDNN_CONVOLUTION_FWD_SPECIFY_WORKSPACE_LIMIT,
-          cudnn_ws_nbytes_limit_,
-          &algo_));
+          nalgo,
+          &valid_algos,
+          algos));
+      bool found = false;
+      for (int i = 0; i < valid_algos; i++) {
+        auto a = algos[i];
+        if (a.memory <= cudnn_ws_nbytes_limit_) {
+          algo_ = a.algo;
+          found = true;
+          break;
+        }
+      }
+      CAFFE_ENFORCE(found, "Unable to find algorithms for cuDNN forward");
     }
     for (int step = 0; step < 2; ++step) {
       cudnnStatus_t _status = cudnnGetConvolutionForwardWorkspaceSize(
@@ -1164,15 +1177,28 @@ bool CudnnConvGradientOp::DoRunWithType() {
       }
     } else {
       // choose backward algorithm for filter
-      CUDNN_ENFORCE(cudnnGetConvolutionBackwardFilterAlgorithm(
+      constexpr int nalgo = CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT;
+      int valid_algos;
+      cudnnConvolutionBwdFilterAlgoPerf_t algos[nalgo];
+      CUDNN_ENFORCE(cudnnGetConvolutionBackwardFilterAlgorithm_v7(
           cudnn_wrapper_.inline_cudnn_handle(),
           bottom_desc_,
           top_desc_,
           bwd_filter_conv_desc_,
           filter_desc_,
-          CUDNN_CONVOLUTION_BWD_FILTER_SPECIFY_WORKSPACE_LIMIT,
-          cudnn_ws_nbytes_limit_,
-          &bwd_filter_algo_));
+          nalgo,
+          &valid_algos,
+          algos));
+      bool found = false;
+      for (int i = 0; i < valid_algos; i++) {
+        auto a = algos[i];
+        if (a.memory <= cudnn_ws_nbytes_limit_) {
+          bwd_filter_algo_ = a.algo;
+          found = true;
+          break;
+        }
+      }
+      CAFFE_ENFORCE(found, "Unable to find algorithms for cuDNN backward filter");
     }
     // Pick dX algo if needed
     if (OutputSize() == 3 || (no_bias_ && (OutputSize() == 2))) {
@@ -1252,15 +1278,28 @@ bool CudnnConvGradientOp::DoRunWithType() {
               bwd_data_conv_desc_, kComputeTypesToTry[bestAlgoIndex]);
         }
       } else {
-        CUDNN_ENFORCE(cudnnGetConvolutionBackwardDataAlgorithm(
+        constexpr int nalgo = CUDNN_CONVOLUTION_BWD_DATA_ALGO_COUNT;
+        int valid_algos;
+        cudnnConvolutionBwdDataAlgoPerf_t algos[nalgo];
+        CUDNN_ENFORCE(cudnnGetConvolutionBackwardDataAlgorithm_v7(
             cudnn_wrapper_.inline_cudnn_handle(),
             filter_desc_,
             top_desc_,
             bwd_data_conv_desc_,
             bottom_desc_,
-            CUDNN_CONVOLUTION_BWD_DATA_SPECIFY_WORKSPACE_LIMIT,
-            cudnn_ws_nbytes_limit_,
-            &bwd_data_algo_));
+            nalgo,
+            &valid_algos,
+            algos));
+        bool found = false;
+        for (int i = 0; i < valid_algos; i++) {
+          auto a = algos[i];
+          if (a.memory <= cudnn_ws_nbytes_limit_) {
+            bwd_data_algo_ = a.algo;
+            found = true;
+            break;
+          }
+        }
+        CAFFE_ENFORCE(found, "Unable to find algorithms for cuDNN backward data");
       }
     }
 

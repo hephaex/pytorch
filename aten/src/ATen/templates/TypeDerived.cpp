@@ -1,20 +1,23 @@
 // required for old g++ to compile PRId64 macros, see
 // https://github.com/pytorch/pytorch/issues/3571
 // for context
+#ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS
+#endif
 
 #include <ATen/${Type}.h>
 
 // ${generated_comment}
 
-$th_headers
 $storage_tensor_headers
 #include <ATen/${Generator}.h>
 #include <c10/core/Allocator.h>
 #include <ATen/DeviceGuard.h>
 #include <ATen/NativeFunctions.h>
+#include <ATen/NamedTensorUtils.h>
 #include <ATen/Utils.h>
 #include <ATen/WrapDimUtils.h>
+#include <ATen/Dispatch.h>
 #include <c10/util/Half.h>
 #include <c10/core/TensorImpl.h>
 #include <c10/core/UndefinedTensorImpl.h>
@@ -26,44 +29,28 @@ $storage_tensor_headers
 #include <utility>
 
 #include <ATen/Config.h>
+#include <ATen/core/op_registration/hacky_wrapper_for_legacy_signatures.h>
+#include <torch/library.h>
 $extra_cuda_headers
+$legacy_th_headers
 
 namespace at {
 
-${Type}::${Type}()
-  : ${DenseBackend}TypeDefault(${Backend}TensorId(), /*is_variable=*/false, /*is_undefined=*/false) {}
-
-ScalarType ${Type}::scalarType() const {
-  return ScalarType::${ScalarName};
-}
-
-caffe2::TypeMeta ${Type}::typeMeta() const {
-    return caffe2::TypeMeta::Make<${ScalarType}>();
-}
-
-Backend ${Type}::backend() const {
-  return Backend::${Backend};
-}
-
-const char * ${Type}::toString() const {
-  return "${Type}";
-}
-
-TypeID ${Type}::ID() const {
-  return ${TypeID};
-}
-
-size_t ${Type}::elementSizeInBytes() const {
-  return sizeof(${ScalarType});
-}
-
 /* example
 Tensor * ${Type}::add(Tensor & a, Tensor & b) {
-  std::cout << "add ${Tensor}\n";
+  std::cout << "add Tensor with backend ${Backend}\n";
   return &a;
 }
 */
 
+namespace ${Type} {
+
 ${type_derived_method_definitions}
 
+}  // namespace ${Type}
+
+TORCH_LIBRARY_IMPL(aten, ${Backend}, m) {
+  ${function_registrations}
 }
+
+} // namespace at

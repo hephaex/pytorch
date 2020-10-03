@@ -17,8 +17,9 @@ template <
 class FullyConnectedOp final : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
-  FullyConnectedOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<Context>(operator_def, ws),
+  template <class... Args>
+  explicit FullyConnectedOp(Args&&... args)
+      : Operator<Context>(std::forward<Args>(args)...),
         axis_(this->template GetSingleArgument<int32_t>("axis", 1)),
         axis_w_(this->template GetSingleArgument<int32_t>("axis_w", 1)),
         float16_compute_(
@@ -104,9 +105,11 @@ class FullyConnectedOp final : public Operator<Context> {
         Y->template mutable_data<T_Y>(),
         &context_,
         math_type);
+
     // Add bias term
     if (!bias_multiplier_.has_value()) {
-      bias_multiplier_ = caffe2::empty({M}, at::dtype<T_B>().device(Context::GetDeviceType()));
+      bias_multiplier_ =
+          caffe2::empty({M}, at::dtype<T_B>().device(Context::GetDeviceType()));
       math::Set<T_B, Context>(
           M,
           convert::To<float, T_B>(1),
@@ -134,6 +137,7 @@ class FullyConnectedOp final : public Operator<Context> {
         Y->template mutable_data<T_Y>(),
         &context_,
         math_type);
+
     return true;
   }
 
@@ -164,8 +168,9 @@ template <
 class FullyConnectedGradientOp : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
-  FullyConnectedGradientOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<Context>(operator_def, ws),
+  template <class... Args>
+  explicit FullyConnectedGradientOp(Args&&... args)
+      : Operator<Context>(std::forward<Args>(args)...),
         axis_(this->template GetSingleArgument<int32_t>("axis", 1)),
         axis_w_(this->template GetSingleArgument<int32_t>("axis_w", 1)),
         float16_compute_(
@@ -259,7 +264,8 @@ class FullyConnectedGradientOp : public Operator<Context> {
         &context_,
         math_type);
     if (!bias_multiplier_.has_value()) {
-      bias_multiplier_ = caffe2::empty({M}, at::dtype<T_B>().device(Context::GetDeviceType()));
+      bias_multiplier_ =
+          caffe2::empty({M}, at::dtype<T_B>().device(Context::GetDeviceType()));
       math::Set<T_B, Context>(
           M,
           convert::To<float, T_B>(1),

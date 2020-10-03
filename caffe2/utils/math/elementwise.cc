@@ -13,6 +13,7 @@
 
 #include "caffe2/core/context.h"
 #include "caffe2/utils/eigen_utils.h"
+#include "caffe2/utils/math.h"
 
 namespace caffe2 {
 namespace math {
@@ -75,6 +76,8 @@ DELEGATE_SIMPLE_UNARY_FUNCTION(float, Inv, vsInv)
 DELEGATE_SIMPLE_UNARY_FUNCTION(double, Inv, vdInv)
 DELEGATE_SIMPLE_UNARY_FUNCTION(float, Erf, vsErf)
 DELEGATE_SIMPLE_UNARY_FUNCTION(double, Erf, vdErf)
+DELEGATE_SIMPLE_UNARY_FUNCTION(float, CdfNorm, vsCdfNorm)
+DELEGATE_SIMPLE_UNARY_FUNCTION(double, CdfNorm, vdCdfNorm)
 #undef DELEGATE_SIMPLE_UNARY_FUNCTION
 
 #define DELEGATE_SINCOS(T, MKLFunc)                                     \
@@ -112,6 +115,32 @@ DELEGATE_SIMPLE_BINARY_FUNCTION(double, Mul, vdMul)
 DELEGATE_SIMPLE_BINARY_FUNCTION(float, Div, vsDiv)
 DELEGATE_SIMPLE_BINARY_FUNCTION(double, Div, vdDiv)
 #undef DELEGATE_SIMPLE_BINARY_FUNCTION
+
+#define DELEGATE_AXPBY(TAlpha, TData, MKLFunc)                                 \
+  template <>                                                                  \
+  C10_EXPORT void Axpby<TAlpha, TData, CPUContext>(                            \
+      const std::int64_t N,                                                    \
+      const TAlpha alpha,                                                      \
+      const TData* X,                                                          \
+      const TAlpha beta,                                                       \
+      TData* Y,                                                                \
+      CPUContext* /* context */) {                                             \
+    MKLFunc(                                                                   \
+        N, static_cast<TData>(alpha), X, 1, static_cast<TData>(beta), Y, 1);   \
+  }                                                                            \
+  template <>                                                                  \
+  C10_EXPORT void Axpby<TAlpha, TData, CPUContext>(                            \
+      const std::int64_t N,                                                    \
+      const TAlpha* alpha,                                                     \
+      const TData* X,                                                          \
+      const TAlpha* beta,                                                      \
+      TData* Y,                                                                \
+      CPUContext* /* context */) {                                             \
+    MKLFunc(                                                                   \
+        N, static_cast<TData>(*alpha), X, 1, static_cast<TData>(*beta), Y, 1); \
+  }
+DELEGATE_AXPBY(float, float, cblas_saxpby)
+#undef DELEGATE_AXPBY
 
 #else // CAFFE2_USE_MKL
 
@@ -213,6 +242,19 @@ CAFFE2_SPECIALIZED_ERF(float)
 CAFFE2_SPECIALIZED_ERF(double)
 #undef CAFFE2_SPECIALIZED_ERF
 
+#define CAFFE2_SPECIALIZED_CDF_NORM(T)                            \
+  template <>                                                     \
+  C10_EXPORT void CdfNorm<T, CPUContext>(                         \
+      const int N, const T* X, T* Y, CPUContext* /* context */) { \
+    std::transform(X, X + N, Y, [](const T x) {                   \
+      constexpr T kRsqrt2 = 0.7071067811865475;                   \
+      return (T(1) + erf(x * kRsqrt2)) * static_cast<T>(0.5);     \
+    });                                                           \
+  }
+CAFFE2_SPECIALIZED_CDF_NORM(float)
+CAFFE2_SPECIALIZED_CDF_NORM(double)
+#undef CAFFE2_SPECIALIZED_CDF_NORM
+
 #define DELEGATE_SIMPLE_BINARY_FUNCTION_BY_EIGEN_OPERATOR(T, Func, EigenOp)   \
   template <>                                                                 \
   C10_EXPORT void Func<T, CPUContext>(                                        \
@@ -230,6 +272,34 @@ DELEGATE_SIMPLE_BINARY_FUNCTION_BY_EIGEN_OPERATOR(float, Div, /)
 DELEGATE_SIMPLE_BINARY_FUNCTION_BY_EIGEN_OPERATOR(double, Div, /)
 #undef DELEGATE_SIMPLE_BINARY_FUNCTION_BY_EIGEN_OPERATOR
 
+#define CAFFE2_SPECIALIZED_AXPBY(TAlpha, TData)                             \
+  template <>                                                               \
+  C10_EXPORT void Axpby<TAlpha, TData, CPUContext>(                         \
+      const std::int64_t N,                                                 \
+      const TAlpha alpha,                                                   \
+      const TData* X,                                                       \
+      const TAlpha beta,                                                    \
+      TData* Y,                                                             \
+      CPUContext* /* context */) {                                          \
+    EigenVectorArrayMap<TData> Y_arr(Y, N);                                 \
+    Y_arr = Y_arr * static_cast<TData>(beta) +                              \
+        ConstEigenVectorArrayMap<TData>(X, N) * static_cast<TData>(alpha);  \
+  }                                                                         \
+  template <>                                                               \
+  C10_EXPORT void Axpby<TAlpha, TData, CPUContext>(                         \
+      const std::int64_t N,                                                 \
+      const TAlpha* alpha,                                                  \
+      const TData* X,                                                       \
+      const TAlpha* beta,                                                   \
+      TData* Y,                                                             \
+      CPUContext* /* context */) {                                          \
+    EigenVectorArrayMap<TData> Y_arr(Y, N);                                 \
+    Y_arr = Y_arr * static_cast<TData>(*beta) +                             \
+        ConstEigenVectorArrayMap<TData>(X, N) * static_cast<TData>(*alpha); \
+  }
+CAFFE2_SPECIALIZED_AXPBY(float, float)
+#undef CAFFE2_SPECIALIZED_AXPBY
+
 #endif // CAFFE2_USE_MKL
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -243,7 +313,7 @@ DELEGATE_SIMPLE_BINARY_FUNCTION_BY_EIGEN_OPERATOR(double, Div, /)
 #define CAFFE2_SPECIALIZED_SCALE(TAlpha, TData)                               \
   template <>                                                                 \
   C10_EXPORT void Scale<TAlpha, TData, CPUContext>(                           \
-      const int N,                                                            \
+      const std::int64_t N,                                                   \
       const TAlpha alpha,                                                     \
       const TData* X,                                                         \
       TData* Y,                                                               \
@@ -257,7 +327,7 @@ DELEGATE_SIMPLE_BINARY_FUNCTION_BY_EIGEN_OPERATOR(double, Div, /)
   }                                                                           \
   template <>                                                                 \
   C10_EXPORT void Scale<TAlpha, TData, CPUContext>(                           \
-      const int N,                                                            \
+      const std::int64_t N,                                                   \
       const TAlpha* alpha,                                                    \
       const TData* X,                                                         \
       TData* Y,                                                               \
@@ -274,6 +344,30 @@ CAFFE2_SPECIALIZED_SCALE(double, double)
 CAFFE2_SPECIALIZED_SCALE(float, double)
 #undef CAFFE2_SPECIALIZED_SCALE
 
+#define CAFFE2_SPECIALIZED_AXPY(TAlpha, TData)                              \
+  template <>                                                               \
+  C10_EXPORT void Axpy<TAlpha, TData, CPUContext>(                          \
+      const std::int64_t N,                                                 \
+      const TAlpha alpha,                                                   \
+      const TData* X,                                                       \
+      TData* Y,                                                             \
+      CPUContext* /* context */) {                                          \
+    EigenVectorArrayMap<TData>(Y, N) +=                                     \
+        ConstEigenVectorArrayMap<TData>(X, N) * static_cast<TData>(alpha);  \
+  }                                                                         \
+  template <>                                                               \
+  C10_EXPORT void Axpy<TAlpha, TData, CPUContext>(                          \
+      const std::int64_t N,                                                 \
+      const TAlpha* alpha,                                                  \
+      const TData* X,                                                       \
+      TData* Y,                                                             \
+      CPUContext* /* context */) {                                          \
+    EigenVectorArrayMap<TData>(Y, N) +=                                     \
+        ConstEigenVectorArrayMap<TData>(X, N) * static_cast<TData>(*alpha); \
+  }
+CAFFE2_SPECIALIZED_AXPY(float, float)
+#undef CAFFE2_SPECIALIZED_AXPY
+
 #else // CAFFE2_USE_EIGEN_FOR_BLAS
 
 #ifdef CAFFE2_USE_MKL
@@ -281,28 +375,56 @@ CAFFE2_SPECIALIZED_SCALE(float, double)
 #define DELEGATE_SCALE(TAlpha, TData, MKLFunc1, MKLFunc2)            \
   template <>                                                        \
   C10_EXPORT void Scale<TAlpha, TData, CPUContext>(                  \
-      const int N,                                                   \
+      const std::int64_t N,                                          \
       const TAlpha alpha,                                            \
       const TData* X,                                                \
       TData* Y,                                                      \
       CPUContext* /* context */) {                                   \
-    if (Y == X) {                                                    \
-      MKLFunc1(N, static_cast<TData>(alpha), Y, 1);                  \
-    } else {                                                         \
-      MKLFunc2(N, static_cast<TData>(alpha), X, 1, TData(0), Y, 1);  \
+    const int max_int = std::numeric_limits<int32_t>::max();         \
+    int batch = N / max_int;                                         \
+    int remainder = N % max_int;                                     \
+    std::int64_t offset = 0;                                         \
+    for (int i = 0; i < batch; i ++) {                               \
+      if (Y == X) {                                                  \
+        MKLFunc1(max_int, static_cast<TData>(alpha), Y + offset, 1); \
+      } else {                                                       \
+        MKLFunc2(max_int, static_cast<TData>(alpha), X + offset, 1, TData(0), Y + offset, 1);  \
+      }                                                              \
+      offset += max_int;                                             \
+    }                                                                \
+    if (remainder != 0) {                                            \
+      if (Y == X) {                                                  \
+        MKLFunc1(remainder, static_cast<TData>(alpha), Y + offset, 1); \
+      } else {                                                       \
+        MKLFunc2(remainder, static_cast<TData>(alpha), X + offset, 1, TData(0), Y + offset, 1);  \
+      }                                                              \
     }                                                                \
   }                                                                  \
   template <>                                                        \
   C10_EXPORT void Scale<TAlpha, TData, CPUContext>(                  \
-      const int N,                                                   \
+      const std::int64_t N,                                          \
       const TAlpha* alpha,                                           \
       const TData* X,                                                \
       TData* Y,                                                      \
       CPUContext* /* context */) {                                   \
-    if (Y == X) {                                                    \
-      MKLFunc1(N, static_cast<TData>(*alpha), Y, 1);                 \
-    } else {                                                         \
-      MKLFunc2(N, static_cast<TData>(*alpha), X, 1, TData(0), Y, 1); \
+    const int max_int = std::numeric_limits<int32_t>::max();         \
+    int batch = N / max_int;                                         \
+    int remainder = N % max_int;                                     \
+    std::int64_t offset = 0;                                         \
+    for (int i = 0; i < batch; i ++) {                               \
+      if (Y == X) {                                                  \
+        MKLFunc1(max_int, static_cast<TData>(*alpha), Y + offset, 1); \
+      } else {                                                       \
+        MKLFunc2(max_int, static_cast<TData>(*alpha), X + offset, 1, TData(0), Y + offset, 1);  \
+      }                                                              \
+      offset += max_int;                                             \
+    }                                                                \
+    if (remainder != 0) {                                            \
+      if (Y == X) {                                                  \
+        MKLFunc1(remainder, static_cast<TData>(*alpha), Y + offset, 1); \
+      } else {                                                       \
+        MKLFunc2(remainder, static_cast<TData>(*alpha), X + offset, 1, TData(0), Y + offset, 1); \
+      }                                                              \
     }                                                                \
   }
 DELEGATE_SCALE(float, float, cblas_sscal, cblas_saxpby)
@@ -315,7 +437,7 @@ DELEGATE_SCALE(float, double, cblas_dscal, cblas_daxpby)
 #define DELEGATE_SCALE(TAlpha, TData, BLASFunc)                               \
   template <>                                                                 \
   C10_EXPORT void Scale<TAlpha, TData, CPUContext>(                           \
-      const int N,                                                            \
+      const std::int64_t N,                                                   \
       const TAlpha alpha,                                                     \
       const TData* X,                                                         \
       TData* Y,                                                               \
@@ -329,7 +451,7 @@ DELEGATE_SCALE(float, double, cblas_dscal, cblas_daxpby)
   }                                                                           \
   template <>                                                                 \
   C10_EXPORT void Scale<TAlpha, TData, CPUContext>(                           \
-      const int N,                                                            \
+      const std::int64_t N,                                                   \
       const TAlpha* alpha,                                                    \
       const TData* X,                                                         \
       TData* Y,                                                               \
@@ -348,6 +470,28 @@ DELEGATE_SCALE(float, double, cblas_dscal)
 
 #endif // CAFFE2_USE_MKL
 
+#define DELEGATE_AXPY(TAlpha, TData, BLASFunc)           \
+  template <>                                            \
+  C10_EXPORT void Axpy<TAlpha, TData, CPUContext>(       \
+      const std::int64_t N,                              \
+      const TAlpha alpha,                                \
+      const TData* X,                                    \
+      TData* Y,                                          \
+      CPUContext* /* context */) {                       \
+    BLASFunc(N, static_cast<TData>(alpha), X, 1, Y, 1);  \
+  }                                                      \
+  template <>                                            \
+  C10_EXPORT void Axpy<TAlpha, TData, CPUContext>(       \
+      const std::int64_t N,                              \
+      const TAlpha* alpha,                               \
+      const TData* X,                                    \
+      TData* Y,                                          \
+      CPUContext* /* context */) {                       \
+    BLASFunc(N, static_cast<TData>(*alpha), X, 1, Y, 1); \
+  }
+DELEGATE_AXPY(float, float, cblas_saxpy)
+#undef DELEGATE_AXPY
+
 #endif // CAFFE2_USE_EIGEN_FOR_BLAS
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -356,18 +500,18 @@ DELEGATE_SCALE(float, double, cblas_dscal)
 // Eigen or via custom code.
 ////////////////////////////////////////////////////////////////////////////////
 
-#define CAFFE2_SPECIALIZED_SET(T)                                    \
-  template <>                                                        \
-  C10_EXPORT void Set<T, CPUContext>(                                \
-      const int N, const T alpha, T* Y, CPUContext* /* context */) { \
-    if (N == 0) {                                                    \
-      return;                                                        \
-    }                                                                \
-    if (alpha == T(0)) {                                             \
-      std::memset(Y, 0, N * sizeof(T));                              \
-    } else {                                                         \
-      EigenVectorArrayMap<T>(Y, N).setConstant(alpha);               \
-    }                                                                \
+#define CAFFE2_SPECIALIZED_SET(T)                                             \
+  template <>                                                                 \
+  C10_EXPORT void Set<T, CPUContext>(                                         \
+      const std::int64_t N, const T alpha, T* Y, CPUContext* /* context */) { \
+    if (N == 0) {                                                             \
+      return;                                                                 \
+    }                                                                         \
+    if (alpha == T(0)) {                                                      \
+      std::memset(Y, 0, N * sizeof(T));                                       \
+    } else {                                                                  \
+      EigenVectorArrayMap<T>(Y, N).setConstant(alpha);                        \
+    }                                                                         \
   }
 CAFFE2_SPECIALIZED_SET(float)
 CAFFE2_SPECIALIZED_SET(double)
@@ -418,7 +562,7 @@ CAFFE2_SPECIALIZED_NEG(double)
 #define CAFFE2_SPECIALIZED_SCALE(TAlpha, TData)                               \
   template <>                                                                 \
   C10_EXPORT void Scale<TAlpha, TData, CPUContext>(                           \
-      const int N,                                                            \
+      const std::int64_t N,                                                   \
       const TAlpha alpha,                                                     \
       const TData* X,                                                         \
       TData* Y,                                                               \
@@ -432,7 +576,7 @@ CAFFE2_SPECIALIZED_NEG(double)
   }                                                                           \
   template <>                                                                 \
   C10_EXPORT void Scale<TAlpha, TData, CPUContext>(                           \
-      const int N,                                                            \
+      const std::int64_t N,                                                   \
       const TAlpha* alpha,                                                    \
       const TData* X,                                                         \
       TData* Y,                                                               \

@@ -45,7 +45,8 @@ inline C10_HOST_DEVICE Half::operator __half() const {
 
 // CUDA intrinsics
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 350)
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 350)) || \
+    (defined(__clang__) && defined(__CUDA__))
 inline __device__ Half __ldg(const Half* ptr) {
     return __ldg(reinterpret_cast<const __half*>(ptr));
 }
@@ -70,7 +71,11 @@ inline C10_HOST_DEVICE Half operator/(const Half& a, const Half& b) {
 }
 
 inline C10_HOST_DEVICE Half operator-(const Half& a) {
+#if (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 530) || defined(__HIP_DEVICE_COMPILE__)
+  return __hneg(a);
+#else
   return -static_cast<float>(a);
+#endif
 }
 
 inline C10_HOST_DEVICE Half& operator+=(Half& a, const Half& b) {
@@ -254,31 +259,31 @@ class numeric_limits<c10::Half> {
   static constexpr auto tinyness_before =
       numeric_limits<float>::tinyness_before;
   static constexpr c10::Half min() {
-    return c10::Half(0x0400, c10::Half::from_bits);
+    return c10::Half(0x0400, c10::Half::from_bits());
   }
   static constexpr c10::Half lowest() {
-    return c10::Half(0xFBFF, c10::Half::from_bits);
+    return c10::Half(0xFBFF, c10::Half::from_bits());
   }
   static constexpr c10::Half max() {
-    return c10::Half(0x7BFF, c10::Half::from_bits);
+    return c10::Half(0x7BFF, c10::Half::from_bits());
   }
   static constexpr c10::Half epsilon() {
-    return c10::Half(0x1400, c10::Half::from_bits);
+    return c10::Half(0x1400, c10::Half::from_bits());
   }
   static constexpr c10::Half round_error() {
-    return c10::Half(0x3800, c10::Half::from_bits);
+    return c10::Half(0x3800, c10::Half::from_bits());
   }
   static constexpr c10::Half infinity() {
-    return c10::Half(0x7C00, c10::Half::from_bits);
+    return c10::Half(0x7C00, c10::Half::from_bits());
   }
   static constexpr c10::Half quiet_NaN() {
-    return c10::Half(0x7E00, c10::Half::from_bits);
+    return c10::Half(0x7E00, c10::Half::from_bits());
   }
   static constexpr c10::Half signaling_NaN() {
-    return c10::Half(0x7D00, c10::Half::from_bits);
+    return c10::Half(0x7D00, c10::Half::from_bits());
   }
   static constexpr c10::Half denorm_min() {
-    return c10::Half(0x0001, c10::Half::from_bits);
+    return c10::Half(0x0001, c10::Half::from_bits());
   }
 };
 

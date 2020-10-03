@@ -6,10 +6,10 @@ TensorRT related transformation
 Note that ONNX-TRT enforce an NCHW input!
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+
+
+
+
 
 from caffe2.proto import caffe2_pb2
 from caffe2.python.onnx.helper import c2_native_run_net, c2_native_run_op
@@ -83,7 +83,7 @@ def transform_caffe2_net(
         debug_builder=False,
         build_serializable_op=True):
     """
-    Transfrom the caffe2_net by collapsing TRT-runnable nodes into trt c2 ops
+    Transform the caffe2_net by collapsing TRT-runnable nodes into trt c2 ops
     """
     check_gpu_()
 

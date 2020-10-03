@@ -2,7 +2,7 @@
 #include "caffe2/core/flags.h"
 #include "caffe2/core/tensor.h"
 
-#if defined(CAFFE2_USE_MPSCNN) && C10_MOBILE
+#if defined(CAFFE2_USE_MPSCNN) && defined(C10_MOBILE)
 #include "caffe2/mobile/contrib/ios/mpscnn/mpscnn.h"
 #endif
 
@@ -14,7 +14,7 @@ Caffe2IOSPredictor* Caffe2IOSPredictor::NewCaffe2IOSPredictor(const caffe2::NetD
                                                               bool allowMetalOperators) {
   caffe2::NetDef metal_predict_net;
   bool usingMetalOperators = false;
-#if defined(CAFFE2_USE_MPSCNN) && C10_MOBILE
+#if defined(CAFFE2_USE_MPSCNN) && defined(C10_MOBILE)
   if (allowMetalOperators) {
     caffe2::dumpDef(predict_net);
     if (caffe2::tryConvertToMPSCNN(init_net, predict_net, &metal_predict_net)) {
@@ -38,7 +38,7 @@ Caffe2IOSPredictor::Caffe2IOSPredictor(const caffe2::NetDef& init_net,
                                        bool disableMultithreadProcessing,
                                        bool usingMetalOperators)
     : usingMetalOperators(usingMetalOperators), predictor_(init_net, predict_net) {
-#if C10_MOBILE
+#ifdef C10_MOBILE
   if (disableMultithreadProcessing) {
     caffe2::ThreadPool* threadpool = predictor_.ws()->GetThreadPool();
     if (threadpool != nullptr) {
@@ -57,10 +57,6 @@ void Caffe2IOSPredictor::run(const Tensor& inData, Tensor& outData, std::string&
   caffe2::Predictor::TensorList output_vec;
   try {
     predictor_(input_vec, &output_vec);
-  } catch (const caffe2::EnforceNotMet& e) {
-    std::string error = e.msg();
-    errorMessage.swap(error);
-    return;
   } catch (const std::exception& e) {
     std::string error = e.what();
     errorMessage.swap(error);

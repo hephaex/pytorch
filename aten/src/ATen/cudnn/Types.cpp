@@ -4,17 +4,21 @@
 
 namespace at { namespace native {
 
-cudnnDataType_t getCudnnDataType(const at::Tensor& tensor) {
-  if (tensor.type().scalarType() == at::kFloat) {
+cudnnDataType_t getCudnnDataTypeFromScalarType(const at::ScalarType dtype) {
+  if (dtype == at::kFloat) {
     return CUDNN_DATA_FLOAT;
-  } else if (tensor.type().scalarType() == at::kDouble) {
+  } else if (dtype == at::kDouble) {
     return CUDNN_DATA_DOUBLE;
-  } else if (tensor.type().scalarType() == at::kHalf) {
+  } else if (dtype == at::kHalf) {
     return CUDNN_DATA_HALF;
   }
-  std::string msg("getCudnnDataType() not supported for ");
-  msg += toString(tensor.type().scalarType());
+  std::string msg("getCudnnDataTypeFromScalarType() not supported for ");
+  msg += toString(dtype);
   throw std::runtime_error(msg);
+}
+
+cudnnDataType_t getCudnnDataType(const at::Tensor& tensor) {
+  return getCudnnDataTypeFromScalarType(tensor.scalar_type());
 }
 
 int64_t cudnn_version() {

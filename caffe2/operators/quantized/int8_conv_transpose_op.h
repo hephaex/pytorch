@@ -17,8 +17,9 @@ namespace int8 {
 class Int8ConvTransposeOp final : public ConvTransposeUnpoolBase<CPUContext> {
  public:
   USE_CONV_TRANSPOSE_UNPOOL_BASE_FUNCTIONS(CPUContext);
-  Int8ConvTransposeOp(const OperatorDef& def, Workspace* ws)
-      : ConvTransposeUnpoolBase(def, ws) {
+  template <class... Args>
+  explicit Int8ConvTransposeOp(Args&&... args)
+      : ConvTransposeUnpoolBase(std::forward<Args>(args)...) {
     OPERATOR_NEEDS_FEATURE(
         this->order_ == StorageOrder::NHWC,
         "Int8ConvTransposeOp only supports NHWC order");
@@ -139,7 +140,7 @@ class Int8ConvTransposeOp final : public ConvTransposeUnpoolBase<CPUContext> {
         lastOutputPointer_ = Y->t.template mutable_data<uint8_t>();
       }
 
-#ifdef FBCODE_CAFFE2
+#if defined(FBCODE_CAFFE2) || !defined(USE_INTERNAL_PTHREADPOOL_IMPL)
       const qnnp_status runStatus =
           qnnp_run_operator(this->qnnpackObject_, nullptr /* thread pool */);
 #else

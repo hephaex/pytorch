@@ -17,7 +17,7 @@
 #include <cfloat>
 
 #include "caffe2/core/context_gpu.h"
-#include "group_spatial_softmax_op.h"
+#include "modules/detectron/group_spatial_softmax_op.h"
 
 namespace caffe2 {
 
@@ -25,7 +25,7 @@ namespace {
 
 __global__ void GroupSpatialSoftmaxKernel(const int num, const int A, const int W,
     const int H, const float* Xdata, float* Pdata, const int num_classes) {
-  // Loop throuh labels (N x A x H x W)
+  // Loop through labels (N x A x H x W)
   CUDA_1D_KERNEL_LOOP(index, num * A * H * W) {
     int D = num_classes * A;
     int x = index % W;
